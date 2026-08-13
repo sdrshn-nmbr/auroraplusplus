@@ -31,7 +31,7 @@ app = modal.App("aurorapp-compatibility")
 
 CUDA_IMAGE = "nvidia/cuda@sha256:6b6617592b94e7dcc6ffbe6d00720eed27bc6e3b4f06b26b93b4070c31f57391"
 runtime_base_image = modal.Image.from_registry(CUDA_IMAGE, add_python="3.12").apt_install(
-    "git", "pciutils", "libcurl4", "libibverbs1", "librdmacm1"
+    "git", "pciutils", "libcurl4", "libibverbs1", "librdmacm1", "libnuma1"
 )
 base_image = runtime_base_image.add_local_python_source("aurorapp")
 
@@ -50,6 +50,7 @@ sglang_image = (
         "python -m pip install --upgrade pip uv",
         "uv pip install --system -e '/opt/sglang/python[all]'",
         "uv pip install --system mooncake-transfer-engine==0.3.12.post1",
+        "ldd /usr/local/lib/python3.12/site-packages/mooncake/mooncake_master",
         "uv pip uninstall --system sgl-deep-gemm",
     )
     .env(
