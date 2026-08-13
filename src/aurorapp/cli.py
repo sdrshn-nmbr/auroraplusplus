@@ -189,9 +189,12 @@ def probe_source_compatibility(
             evidence = (target, dflash)
             detail = "one request, fixed server seed, exact token and text parity"
         elif name == "target-hidden-state-capture":
-            status = CompatibilityStatus.FAILED
+            status = CompatibilityStatus.NOT_RUN
             evidence = (source_artifact,)
-            detail = "SpecForge capture patch rejects the exact pinned SGLang tree"
+            detail = (
+                "ported capture patch applies to exact SGLang source; "
+                "physical Laguna capture has not passed"
+            )
         steps.append(
             CompatibilityStepResult(
                 name=name,
@@ -218,9 +221,12 @@ def probe_source_compatibility(
     _json(
         {
             "draft_hash": draft_hash,
-            "expected_incompatibility_verified": result.expected_incompatibility_verified,
+            "upstream_incompatibility_verified": (
+                result.upstream_incompatibility_verified
+            ),
+            "ported_patch_applies": result.ported_patch.applies_cleanly,
             "report_hash": report_hash,
-            "status": "failed",
+            "status": "blocked",
         }
     )
     raise typer.Exit(2)
