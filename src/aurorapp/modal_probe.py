@@ -27,14 +27,13 @@ SPECFORGE_REVISION = "e6440f09a8574b35f894608559fd3d165971e488"
 app = modal.App("aurorapp-compatibility")
 
 CUDA_IMAGE = "nvidia/cuda@sha256:6b6617592b94e7dcc6ffbe6d00720eed27bc6e3b4f06b26b93b4070c31f57391"
-base_image = (
-    modal.Image.from_registry(CUDA_IMAGE, add_python="3.12")
-    .apt_install("git", "pciutils")
-    .add_local_python_source("aurorapp")
+runtime_base_image = modal.Image.from_registry(CUDA_IMAGE, add_python="3.12").apt_install(
+    "git", "pciutils"
 )
+base_image = runtime_base_image.add_local_python_source("aurorapp")
 
 sglang_image = (
-    base_image.env({"SGLANG_BUILD_RUST_EXTS": "none"})
+    runtime_base_image.env({"SGLANG_BUILD_RUST_EXTS": "none"})
     .run_commands(
         "git clone --filter=blob:none https://github.com/sgl-project/sglang.git /opt/sglang",
         f"git -C /opt/sglang checkout {SGLANG_REVISION}",
@@ -50,6 +49,7 @@ sglang_image = (
             "SGLANG_ENABLE_JIT_DEEPGEMM": "0",
         }
     )
+    .add_local_python_source("aurorapp")
 )
 
 model_cache = modal.Volume.from_name("aurorapp-model-cache", create_if_missing=True)
