@@ -357,13 +357,33 @@ def _specforge_ingest(port: int) -> dict[str, Any]:
         "--base-url",
         f"http://127.0.0.1:{port}",
     ]
-    completed = subprocess.run(
-        command,
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=300,
-    )
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+    except subprocess.TimeoutExpired as error:
+        stdout = (
+            error.stdout.decode(errors="replace")
+            if isinstance(error.stdout, bytes)
+            else error.stdout
+        )
+        stderr = (
+            error.stderr.decode(errors="replace")
+            if isinstance(error.stderr, bytes)
+            else error.stderr
+        )
+        return {
+            "passed": False,
+            "command": command,
+            "returncode": None,
+            "stdout": stdout or "",
+            "stderr": stderr or "",
+            "error": "SpecForge ingest subprocess timed out after 300 seconds",
+        }
     marker = "AURORAPP_RESULT="
     result_lines = [
         line.removeprefix(marker)
@@ -405,6 +425,18 @@ def _specforge_ingest(port: int) -> dict[str, Any]:
         "token_count": token_count,
         "feature_width": feature_width,
     }
+
+
+def _specforge_ingest_after_prewarm(port: int) -> dict[str, Any]:
+    prewarm = _capture_generate(port)
+    if prewarm.get("passed") is not True:
+        return {
+            "passed": False,
+            "prewarm": prewarm,
+            "error": "Mooncake capture sink prewarm failed",
+        }
+    ingest = _specforge_ingest(port)
+    return {**ingest, "prewarm": prewarm}
 
 
 def _port_is_closed(port: int) -> bool:
@@ -618,7 +650,9 @@ def _capture_server_probe(
     try:
         _wait_for_server(port, process, timeout=900)
         server_healthy = True
-        workload = _specforge_ingest(port) if specforge_ingest else _capture_generate(port)
+        workload = (
+            _specforge_ingest_after_prewarm(port) if specforge_ingest else _capture_generate(port)
+        )
     except Exception as exception:
         error = {"type": type(exception).__name__, "message": str(exception)}
     finally:

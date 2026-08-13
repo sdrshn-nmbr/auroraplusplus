@@ -8,6 +8,7 @@ import sys
 import pytest
 
 from aurorapp.modal_probe import (
+    _specforge_ingest_after_prewarm,
     _stop_process_group,
     validate_dflash_capture_result,
     validate_specforge_ingest_result,
@@ -77,6 +78,28 @@ def test_specforge_ingest_requires_exact_materialized_training_tensors() -> None
     result["materialized"]["loss_mask"]["values"] = [0, 0, 0, 0]
     with pytest.raises(ValueError, match="loss mask"):
         validate_specforge_ingest_result(result, [1, 2, 3, 4], [0, 0, 1, 1])
+
+
+def test_specforge_reader_connects_only_after_capture_sink_is_warm(monkeypatch) -> None:
+    events = []
+
+    def capture(_port):
+        events.append("capture-store-connected")
+        return {"passed": True}
+
+    def ingest(_port):
+        assert events == ["capture-store-connected"]
+        events.append("specforge-store-connected")
+        return {"passed": True}
+
+    monkeypatch.setattr("aurorapp.modal_probe._capture_generate", capture)
+    monkeypatch.setattr("aurorapp.modal_probe._specforge_ingest", ingest)
+
+    result = _specforge_ingest_after_prewarm(33000)
+
+    assert result["passed"] is True
+    assert result["prewarm"] == {"passed": True}
+    assert events == ["capture-store-connected", "specforge-store-connected"]
 
 
 def test_cleanup_kills_children_after_process_group_leader_exits(monkeypatch) -> None:
