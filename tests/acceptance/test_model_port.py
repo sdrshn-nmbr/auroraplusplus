@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import pytest
 
@@ -28,6 +29,15 @@ def execution_state() -> DraftExecutionState:
         cublas_allow_tf32=False,
         cudnn_allow_tf32=True,
     )
+
+
+def test_training_wrapper_does_not_cast_nonpersistent_model_buffers() -> None:
+    source = (
+        Path(__file__).parents[2] / "scripts" / "specforge_captured_optimizer_probe.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'loss_type="dflash",\n    ).to(device="cuda")' in source
+    assert 'loss_type="dflash",\n    ).to(device="cuda", dtype=torch.bfloat16)' not in source
 
 
 def official_config() -> LagunaDFlashConfigContract:

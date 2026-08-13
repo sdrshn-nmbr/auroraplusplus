@@ -353,7 +353,7 @@ def build_training_model(args: argparse.Namespace):
         num_anchors=1,
         objective_chunk_blocks=1,
         loss_type="dflash",
-    ).to(device="cuda", dtype=torch.bfloat16)
+    ).to(device="cuda")
     return training_model
 
 
