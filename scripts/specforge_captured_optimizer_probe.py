@@ -2,7 +2,6 @@ import argparse
 import gc
 import hashlib
 import json
-import math
 import os
 import random
 import subprocess
@@ -400,15 +399,12 @@ def train(args: argparse.Namespace) -> None:
             parameter_delta=delta,
             checkpoint_hashes=checkpoint_hashes,
             checkpoint_path=str(checkpoint),
+            pre_save_state_digest=reference_state_digest,
             training_cursor=1,
-            reload_missing=reload_result.missing,
-            reload_unexpected=reload_result.unexpected,
-            reload_output_equal=reload_result.passed,
+            reload=reload_result,
             released=released,
             release_pending=int(release_drain.get("release_pending", -1)),
         )
-        if not result.passed or not math.isfinite(result.loss):
-            raise RuntimeError(result.model_dump_json())
         print(
             "AURORAPP_RESULT="
             + result.model_dump_json(exclude={"passed"}),

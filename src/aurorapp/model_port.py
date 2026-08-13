@@ -111,10 +111,9 @@ class CapturedBatchOptimizerResult(StrictModel):
     parameter_delta: float = Field(ge=0)
     checkpoint_hashes: dict[str, Sha256]
     checkpoint_path: str = Field(min_length=1)
+    pre_save_state_digest: Sha256
     training_cursor: Literal[1]
-    reload_missing: tuple[str, ...]
-    reload_unexpected: tuple[str, ...]
-    reload_output_equal: bool
+    reload: "CheckpointReloadResult"
     released: bool
     release_pending: int = Field(ge=0)
 
@@ -149,9 +148,8 @@ class CapturedBatchOptimizerResult(StrictModel):
             and math.isfinite(self.parameter_delta)
             and self.parameter_delta > 0
             and required_checkpoint_files == set(self.checkpoint_hashes)
-            and not self.reload_missing
-            and not self.reload_unexpected
-            and self.reload_output_equal
+            and self.reload.reference_state_digest == self.pre_save_state_digest
+            and self.reload.passed
             and self.released
             and self.release_pending == 0
         )
