@@ -14,6 +14,7 @@ import modal
 
 from aurorapp.artifacts import ContentAddressedArtifactStore
 from aurorapp.canonical import canonical_bytes
+from aurorapp.models import ArtifactRef
 from aurorapp.sglang_contract import greedy_generation_request
 
 TARGET_REPOSITORY = "poolside/Laguna-XS-2.1-INT4"
@@ -26,7 +27,11 @@ SPECFORGE_REVISION = "e6440f09a8574b35f894608559fd3d165971e488"
 app = modal.App("aurorapp-compatibility")
 
 CUDA_IMAGE = "nvidia/cuda@sha256:6b6617592b94e7dcc6ffbe6d00720eed27bc6e3b4f06b26b93b4070c31f57391"
-base_image = modal.Image.from_registry(CUDA_IMAGE, add_python="3.12").apt_install("git", "pciutils")
+base_image = (
+    modal.Image.from_registry(CUDA_IMAGE, add_python="3.12")
+    .apt_install("git", "pciutils")
+    .add_local_python_source("aurorapp")
+)
 
 sglang_image = (
     base_image.env({"SGLANG_BUILD_RUST_EXTS": "none"})
@@ -341,14 +346,15 @@ def main(probe: str = "identity", output: str = "", allow_dirty: bool = False) -
             "status": "failed",
             "error_type": type(error).__name__,
             "error": str(error),
+            "repository_revision": revision,
         }
+        artifact_store = ContentAddressedArtifactStore(Path("artifacts/compatibility/store"))
+        artifact = _publish_record(artifact_store, probe, record)
+        record["artifact"] = artifact.model_dump(mode="json")
         _write_result(output, record)
         raise
     artifact_store = ContentAddressedArtifactStore(Path("artifacts/compatibility/store"))
-    staged = artifact_store.stage_bytes(
-        f"{probe}.json", canonical_bytes(record) + b"\n", producer="pre-baseline-modal-probe"
-    )
-    artifact = artifact_store.commit(staged, loader=lambda path: bool(json.loads(path.read_text())))
+    artifact = _publish_record(artifact_store, probe, record)
     record["artifact"] = artifact.model_dump(mode="json")
     _write_result(output, record)
 
@@ -360,6 +366,17 @@ def _write_result(output: str, record: dict[str, Any]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(encoded + "\n", encoding="utf-8")
     print(encoded)
+
+
+def _publish_record(
+    artifact_store: ContentAddressedArtifactStore,
+    probe: str,
+    record: dict[str, Any],
+) -> ArtifactRef:
+    staged = artifact_store.stage_bytes(
+        f"{probe}.json", canonical_bytes(record) + b"\n", producer="pre-activation-modal-probe"
+    )
+    return artifact_store.commit(staged, loader=lambda path: bool(json.loads(path.read_text())))
 
 
 def _local_repository_revision(allow_dirty: bool) -> str:
