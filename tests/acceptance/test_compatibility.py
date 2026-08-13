@@ -40,7 +40,8 @@ def test_report_requires_every_resolvable_step_in_exact_order(tmp_path: Path) ->
         for name in COMPATIBILITY_LADDER
     )
     report = CompatibilityReport(
-        experiment_run_id=RUN_ID,
+        identity_kind="run",
+        experiment_identity=RUN_ID,
         steps=steps,
         cleanup_verified=True,
     )
@@ -60,7 +61,8 @@ def test_one_not_run_step_blocks_activation(tmp_path: Path) -> None:
         steps[7].evidence[0],
     )
     report = CompatibilityReport(
-        experiment_run_id=RUN_ID,
+        identity_kind="run",
+        experiment_identity=RUN_ID,
         steps=tuple(steps),
         cleanup_verified=True,
     )
@@ -71,7 +73,8 @@ def test_one_not_run_step_blocks_activation(tmp_path: Path) -> None:
 def test_cleanup_failure_blocks_activation(tmp_path: Path) -> None:
     store = ContentAddressedArtifactStore(tmp_path)
     report = CompatibilityReport(
-        experiment_run_id=RUN_ID,
+        identity_kind="run",
+        experiment_identity=RUN_ID,
         steps=tuple(
             result(name, CompatibilityStatus.PASSED, evidence(store, name))
             for name in COMPATIBILITY_LADDER
@@ -88,7 +91,8 @@ def test_unresolvable_or_wrong_runtime_evidence_blocks_activation(tmp_path: Path
     wrong = refs[0].model_copy(update={"producer": "experiment:wrong:compatibility"})
     refs[0] = wrong
     report = CompatibilityReport(
-        experiment_run_id=RUN_ID,
+        identity_kind="run",
+        experiment_identity=RUN_ID,
         steps=tuple(
             result(name, CompatibilityStatus.PASSED, item)
             for name, item in zip(COMPATIBILITY_LADDER, refs, strict=True)

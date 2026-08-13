@@ -1,7 +1,7 @@
 import hashlib
 from enum import StrEnum
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
 
 from huggingface_hub import HfApi, hf_hub_download
 from pydantic import computed_field, model_validator
@@ -43,7 +43,8 @@ class CompatibilityStepResult(StrictModel):
 
 
 class CompatibilityReport(StrictModel):
-    experiment_run_id: Sha256
+    identity_kind: Literal["draft", "run"]
+    experiment_identity: Sha256
     steps: tuple[CompatibilityStepResult, ...]
     cleanup_verified: bool
 
@@ -72,9 +73,9 @@ def verify_compatibility_report(
     report: CompatibilityReport,
     artifact_resolver: ArtifactResolver,
 ) -> bool:
-    if not report.structurally_complete:
+    if report.identity_kind != "run" or not report.structurally_complete:
         return False
-    expected_producer = f"experiment:{report.experiment_run_id}:compatibility"
+    expected_producer = f"experiment:{report.experiment_identity}:compatibility"
     for step in report.steps:
         for artifact in step.evidence:
             if artifact.validation_result != "valid" or artifact.producer != expected_producer:

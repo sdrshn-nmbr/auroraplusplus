@@ -6,7 +6,7 @@ import pytest
 
 from aurorapp.canonical import canonical_sha256
 from aurorapp.database import PostgresControlStore, StaleFenceError, UnverifiedCandidateError
-from aurorapp.models import Event, EventType
+from aurorapp.models import ArtifactRef, Event, EventType
 from aurorapp.simulation import VirtualClock
 
 
@@ -124,3 +124,21 @@ def test_candidate_inspection_is_scoped_to_experiment(store: PostgresControlStor
     store.record_candidate("other", "hidden", "parent", "manifest", True)
 
     assert [row["candidate_id"] for row in store.list_candidates("experiment")] == ["candidate"]
+
+
+def test_compatibility_report_and_artifacts_are_control_plane_records(
+    store: PostgresControlStore,
+) -> None:
+    artifact = ArtifactRef(
+        content_hash="d" * 64,
+        size=7,
+        storage_path="modal-volume://objects/dd/value",
+        producer="source-probe",
+        validation_result="valid",
+    )
+    store.record_artifact(artifact, {"kind": "source-check"})
+    report = {"report_id": "e" * 64, "steps": [{"name": "capture", "status": "failed"}]}
+    store.record_compatibility_report("draft", "f" * 64, report, "e" * 64)
+
+    assert store.artifact("d" * 64)["manifest"] == {"kind": "source-check"}
+    assert store.compatibility_report("draft", "f" * 64)["report"] == report

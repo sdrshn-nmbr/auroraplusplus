@@ -402,6 +402,17 @@ class HumanDecision(StrictModel):
     reviewer: str
     approval: HumanApproval
 
+    def approval_payload(self) -> dict[str, Any]:
+        return self.model_dump(mode="json", exclude={"approval"})
+
+    @model_validator(mode="after")
+    def approval_targets_decision(self) -> "HumanDecision":
+        if self.approval.payload_hash != canonical_sha256(self.approval_payload()):
+            raise ValueError("approval does not target the human decision")
+        if self.approval.signer != self.reviewer:
+            raise ValueError("approval signer does not match reviewer")
+        return self
+
 
 class ConcurrencyResult(StrictModel):
     concurrency: int = Field(ge=1)

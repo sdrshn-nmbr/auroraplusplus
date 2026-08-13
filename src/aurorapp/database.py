@@ -7,7 +7,7 @@ from psycopg import sql
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from aurorapp.models import Event, EventType
+from aurorapp.models import ArtifactRef, Event, EventType
 
 
 class ControlStoreError(RuntimeError):
@@ -117,6 +117,14 @@ CREATE TABLE IF NOT EXISTS signed_objects (
     approval jsonb NOT NULL,
     active boolean NOT NULL DEFAULT false,
     created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS compatibility_reports (
+    identity_kind text NOT NULL,
+    experiment_identity text NOT NULL,
+    report_hash text NOT NULL UNIQUE,
+    report jsonb NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (identity_kind, experiment_identity)
 );
 CREATE TABLE IF NOT EXISTS worker_leases (
     experiment_id text NOT NULL,
@@ -485,6 +493,65 @@ class PostgresControlStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def record_artifact(self, artifact: ArtifactRef, manifest: dict[str, Any]) -> None:
+        with self._connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO artifacts (
+                    content_hash, size, storage_path, producer, validation_result, manifest
+                ) VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (content_hash) DO NOTHING
+                """,
+                (
+                    artifact.content_hash,
+                    artifact.size,
+                    artifact.storage_path,
+                    artifact.producer,
+                    artifact.validation_result,
+                    Jsonb(manifest),
+                ),
+            )
+
+    def artifact(self, content_hash: str) -> dict[str, Any] | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM artifacts WHERE content_hash = %s", (content_hash,)
+            ).fetchone()
+        return None if row is None else dict(row)
+
+    def record_compatibility_report(
+        self,
+        identity_kind: str,
+        experiment_identity: str,
+        report: dict[str, Any],
+        report_hash: str,
+    ) -> None:
+        with self._connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO compatibility_reports (
+                    identity_kind, experiment_identity, report_hash, report
+                ) VALUES (%s, %s, %s, %s)
+                ON CONFLICT (identity_kind, experiment_identity) DO UPDATE
+                SET report_hash = EXCLUDED.report_hash, report = EXCLUDED.report,
+                    created_at = now()
+                """,
+                (identity_kind, experiment_identity, report_hash, Jsonb(report)),
+            )
+
+    def compatibility_report(
+        self, identity_kind: str, experiment_identity: str
+    ) -> dict[str, Any] | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM compatibility_reports
+                WHERE identity_kind = %s AND experiment_identity = %s
+                """,
+                (identity_kind, experiment_identity),
+            ).fetchone()
+        return None if row is None else dict(row)
+
     def enqueue_review(self, experiment_id: str, question: dict[str, Any]) -> int:
         with self._connection() as connection:
             row = connection.execute(
@@ -507,6 +574,13 @@ class PostgresControlStore:
                 ORDER BY review_id LIMIT 1
                 """,
                 (experiment_id,),
+            ).fetchone()
+        return None if row is None else dict(row)
+
+    def review(self, review_id: int) -> dict[str, Any] | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM review_queue WHERE review_id = %s", (review_id,)
             ).fetchone()
         return None if row is None else dict(row)
 

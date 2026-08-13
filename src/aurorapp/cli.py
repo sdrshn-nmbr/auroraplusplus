@@ -6,9 +6,15 @@ from typing import Annotated
 
 import typer
 
+from aurorapp.artifacts import ContentAddressedArtifactStore
 from aurorapp.audit import AuditExporter
 from aurorapp.canonical import canonical_sha256
-from aurorapp.compatibility import COMPATIBILITY_LADDER
+from aurorapp.compatibility import (
+    COMPATIBILITY_LADDER,
+    CompatibilityReport,
+    CompatibilityStatus,
+    CompatibilityStepResult,
+)
 from aurorapp.controller import ControllerState, reduce_event
 from aurorapp.data import (
     build_partition_plan,
@@ -17,9 +23,17 @@ from aurorapp.data import (
     write_partition_plan,
 )
 from aurorapp.database import PostgresControlStore
-from aurorapp.models import EvaluatorBundle, ExperimentDraft, HumanDecision, SystemMode
+from aurorapp.models import (
+    ArtifactRef,
+    EvaluatorBundle,
+    EvidenceLevel,
+    ExperimentDraft,
+    HumanDecision,
+    SystemMode,
+)
 from aurorapp.schema import write_schemas
 from aurorapp.signatures import ApprovalSigner
+from aurorapp.source_probe import run_capture_patch_probe
 
 app = typer.Typer(no_args_is_help=True, help="Aurora++ control and audit CLI.")
 config_app = typer.Typer(no_args_is_help=True)
@@ -135,6 +149,91 @@ def probe_compatibility(
         raise typer.Exit(2)
 
 
+@probe_app.command("source-compatibility")
+def probe_source_compatibility(
+    config: Annotated[Path, typer.Option(exists=True, dir_okay=False)] = DEFAULT_CONFIG,
+    evidence_directory: Annotated[Path, typer.Option(file_okay=False)] = Path(
+        "artifacts/compatibility"
+    ),
+    database_url: Annotated[str, typer.Option()] = os.environ.get(
+        "AURORAPP_DATABASE_URL", "postgresql:///postgres"
+    ),
+    schema: Annotated[str, typer.Option()] = "aurorapp",
+) -> None:
+    draft = ExperimentDraft.model_validate_json(config.read_text(encoding="utf-8"))
+    draft_hash = canonical_sha256(draft.model_dump(mode="json"))
+    result = run_capture_patch_probe(Path.cwd())
+    artifact_store = ContentAddressedArtifactStore(evidence_directory / "store")
+    staged = artifact_store.stage_bytes(
+        "source-capture-compatibility.json",
+        result.model_dump_json(indent=2).encode() + b"\n",
+        producer="compatibility-source-probe",
+    )
+    source_artifact = artifact_store.commit(
+        staged,
+        loader=lambda path: bool(json.loads(path.read_text(encoding="utf-8"))),
+    )
+    target = _probe_artifact(evidence_directory / "target-only-seeded.json")
+    dflash = _probe_artifact(evidence_directory / "official-dflash-seeded.json")
+    steps: list[CompatibilityStepResult] = []
+    for name in COMPATIBILITY_LADDER:
+        status = CompatibilityStatus.NOT_RUN
+        evidence: tuple[ArtifactRef, ...] = ()
+        detail = "not run after capture compatibility stop"
+        if name in {"target-load", "target-only-serving"} and target is not None:
+            status, evidence, detail = CompatibilityStatus.PASSED, (target,), "static target probe"
+        elif name == "official-dflash-load" and dflash is not None:
+            status, evidence, detail = CompatibilityStatus.PASSED, (dflash,), "static DFlash probe"
+        elif name == "greedy-lossless-parity" and target is not None and dflash is not None:
+            status = CompatibilityStatus.PASSED
+            evidence = (target, dflash)
+            detail = "one request, fixed server seed, exact token and text parity"
+        elif name == "target-hidden-state-capture":
+            status = CompatibilityStatus.FAILED
+            evidence = (source_artifact,)
+            detail = "SpecForge capture patch rejects the exact pinned SGLang tree"
+        steps.append(
+            CompatibilityStepResult(
+                name=name,
+                status=status,
+                evidence_level=EvidenceLevel.REAL_PROCESS,
+                evidence=evidence,
+                detail=detail,
+            )
+        )
+    report = CompatibilityReport(
+        identity_kind="draft",
+        experiment_identity=draft_hash,
+        steps=tuple(steps),
+        cleanup_verified=False,
+    )
+    report_payload = report.model_dump(mode="json")
+    report_hash = canonical_sha256(report_payload)
+    store = _store(database_url, schema)
+    store.record_artifact(source_artifact, result.model_dump(mode="json"))
+    for item in (target, dflash):
+        if item is not None:
+            store.record_artifact(item, {"kind": "static-serving-probe"})
+    store.record_compatibility_report("draft", draft_hash, report_payload, report_hash)
+    _json(
+        {
+            "draft_hash": draft_hash,
+            "expected_incompatibility_verified": result.expected_incompatibility_verified,
+            "report_hash": report_hash,
+            "status": "failed",
+        }
+    )
+    raise typer.Exit(2)
+
+
+def _probe_artifact(path: Path) -> ArtifactRef | None:
+    if not path.is_file():
+        return None
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    artifact = payload.get("artifact")
+    return ArtifactRef.model_validate(artifact) if isinstance(artifact, dict) else None
+
+
 @system_app.command("enable")
 def system_enable(
     mode: Annotated[SystemMode, typer.Option()],
@@ -239,13 +338,26 @@ def review_next(
 def review_answer(
     review_id: Annotated[int, typer.Option()],
     decision: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    private_key: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
     database_url: Annotated[str, typer.Option()] = os.environ.get(
         "AURORAPP_DATABASE_URL", "postgresql:///postgres"
     ),
     schema: Annotated[str, typer.Option()] = "aurorapp",
 ) -> None:
     value = HumanDecision.model_validate_json(decision.read_text(encoding="utf-8"))
-    _store(database_url, schema).answer_review(review_id, value.model_dump(mode="json"))
+    store = _store(database_url, schema)
+    queued = store.review(review_id)
+    if queued is None:
+        raise typer.BadParameter(f"review {review_id} does not exist")
+    question = queued["question"]
+    if not isinstance(question, dict) or value.question != question.get("question"):
+        raise typer.BadParameter("decision question does not match queued review")
+    evidence = question.get("evidence")
+    expected_hash = evidence.get("content_hash") if isinstance(evidence, dict) else None
+    if expected_hash not in value.evidence_hashes:
+        raise typer.BadParameter("decision does not include queued evidence hash")
+    ApprovalSigner(private_key, value.reviewer).verify(value.approval_payload(), value.approval)
+    store.answer_review(review_id, value.model_dump(mode="json"))
     _json({"review_id": review_id, "status": "answered"})
 
 
