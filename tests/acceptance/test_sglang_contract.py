@@ -7,7 +7,11 @@ import sys
 
 import pytest
 
-from aurorapp.modal_probe import _stop_process_group, validate_dflash_capture_result
+from aurorapp.modal_probe import (
+    _stop_process_group,
+    validate_dflash_capture_result,
+    validate_specforge_ingest_result,
+)
 from aurorapp.sglang_contract import SGLANG_SERVER_RANDOM_SEED, greedy_generation_request
 
 
@@ -37,6 +41,42 @@ def test_dflash_capture_contract_requires_all_official_laguna_layers() -> None:
     result["features"]["target_aux_hidden_states"]["shape"] = [1, 7, 8192]
     with pytest.raises(ValueError, match="feature shape"):
         validate_dflash_capture_result(result)
+
+
+def test_specforge_ingest_requires_exact_materialized_training_tensors() -> None:
+    result = {
+        "sample_id": "aurorapp-ingest:task-1",
+        "strategy": "dflash",
+        "materialized": {
+            "input_ids": {
+                "shape": [1, 4],
+                "dtype": "int64",
+                "values": [1, 2, 3, 4],
+            },
+            "loss_mask": {
+                "shape": [1, 4],
+                "dtype": "int64",
+                "values": [0, 0, 1, 1],
+            },
+            "hidden_states": {
+                "shape": [1, 4, 10240],
+                "dtype": "bfloat16",
+                "finite": True,
+                "absolute_sum": 12.5,
+            },
+        },
+        "released": True,
+        "release_drain": {"release_pending": 0},
+    }
+
+    assert validate_specforge_ingest_result(result, [1, 2, 3, 4], [0, 0, 1, 1]) == (
+        4,
+        10240,
+    )
+
+    result["materialized"]["loss_mask"]["values"] = [0, 0, 0, 0]
+    with pytest.raises(ValueError, match="loss mask"):
+        validate_specforge_ingest_result(result, [1, 2, 3, 4], [0, 0, 1, 1])
 
 
 def test_cleanup_kills_children_after_process_group_leader_exits(monkeypatch) -> None:

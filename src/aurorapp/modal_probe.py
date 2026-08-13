@@ -36,7 +36,7 @@ runtime_base_image = modal.Image.from_registry(CUDA_IMAGE, add_python="3.12").ap
 )
 base_image = runtime_base_image.add_local_python_source("aurorapp")
 
-sglang_image = (
+sglang_runtime_image = (
     runtime_base_image.add_local_file(
         "patches/sglang/6a5a9ec/spec-capture.patch",
         "/opt/aurorapp/spec-capture.patch",
@@ -52,13 +52,13 @@ sglang_image = (
         "uv pip install --system -e '/opt/sglang/python[all]'",
         "uv pip install --system mooncake-transfer-engine-cuda13==0.3.12.post1",
         (
-            "python -c \"import subprocess; "
+            'python -c "import subprocess; '
             "output = subprocess.run(['ldd', "
             "'/usr/local/lib/python3.12/site-packages/mooncake/mooncake_master'], "
             "check=True, capture_output=True, text=True).stdout; print(output); "
             "missing = [line for line in output.splitlines() "
             "if 'not found' in line and 'libcuda.so.1' not in line]; "
-            "assert not missing, missing\""
+            'assert not missing, missing"'
         ),
         "uv pip uninstall --system sgl-deep-gemm",
     )
@@ -69,6 +69,28 @@ sglang_image = (
             "CUDA_HOME": "/usr/local/cuda",
             "SGLANG_ENABLE_JIT_DEEPGEMM": "0",
         }
+    )
+)
+
+sglang_image = sglang_runtime_image.add_local_python_source("aurorapp")
+
+specforge_image = (
+    sglang_runtime_image.add_local_file(
+        "scripts/specforge_ingest_probe.py",
+        "/opt/aurorapp/specforge_ingest_probe.py",
+        copy=True,
+    )
+    .run_commands(
+        "git clone --filter=blob:none https://github.com/sgl-project/SpecForge.git /opt/specforge",
+        f"git -C /opt/specforge checkout {SPECFORGE_REVISION}",
+        f'test "$(git -C /opt/specforge rev-parse HEAD)" = {SPECFORGE_REVISION}',
+        "uv pip install --system --no-deps -e /opt/specforge",
+        (
+            'python -c "from specforge.inference.adapters.server_capture import '
+            "SGLangServerCaptureAdapter; from specforge.runtime.data_plane."
+            "mooncake_store import MooncakeFeatureStore; "
+            'print(SGLangServerCaptureAdapter, MooncakeFeatureStore)"'
+        ),
     )
     .add_local_python_source("aurorapp")
 )
@@ -276,6 +298,115 @@ def validate_dflash_capture_result(result: object) -> tuple[int, int]:
     return int(shape[1]), int(shape[2])
 
 
+def validate_specforge_ingest_result(
+    result: object,
+    expected_input_ids: list[int],
+    expected_loss_mask: list[int],
+) -> tuple[int, int]:
+    if not isinstance(result, dict):
+        raise ValueError("SpecForge ingest returned no result object")
+    if result.get("strategy") != "dflash":
+        raise ValueError("SpecForge ingest did not produce a DFlash sample")
+    if not result.get("sample_id"):
+        raise ValueError("SpecForge ingest returned no sample identity")
+    materialized = result.get("materialized")
+    if not isinstance(materialized, dict):
+        raise ValueError("SpecForge did not materialize the captured tensors")
+
+    def tensor(name: str) -> dict[str, Any]:
+        value = materialized.get(name)
+        if not isinstance(value, dict):
+            raise ValueError(f"SpecForge batch is missing materialized {name}")
+        return value
+
+    input_ids = tensor("input_ids")
+    loss_mask = tensor("loss_mask")
+    hidden_states = tensor("hidden_states")
+    token_count = len(expected_input_ids)
+    if input_ids.get("shape") != [1, token_count] or input_ids.get("dtype") != "int64":
+        raise ValueError("SpecForge input IDs have the wrong tensor contract")
+    if input_ids.get("values") != expected_input_ids:
+        raise ValueError("SpecForge input IDs differ from the captured request")
+    if loss_mask.get("shape") != [1, token_count] or loss_mask.get("dtype") != "int64":
+        raise ValueError("SpecForge loss mask has the wrong tensor contract")
+    if loss_mask.get("values") != expected_loss_mask:
+        raise ValueError("SpecForge loss mask differs from the captured request")
+    if hidden_states.get("shape") != [1, token_count, 10240]:
+        raise ValueError("SpecForge hidden states have the wrong Laguna DFlash shape")
+    if hidden_states.get("dtype") != "bfloat16":
+        raise ValueError("SpecForge hidden states are not bfloat16")
+    if hidden_states.get("finite") is not True:
+        raise ValueError("SpecForge hidden states contain non-finite values")
+    absolute_sum = hidden_states.get("absolute_sum")
+    if not isinstance(absolute_sum, int | float) or absolute_sum <= 0:
+        raise ValueError("SpecForge hidden states are empty or all zero")
+    release_drain = result.get("release_drain")
+    if (
+        result.get("released") is not True
+        or not isinstance(release_drain, dict)
+        or release_drain.get("release_pending") != 0
+    ):
+        raise ValueError("SpecForge did not release the materialized batch")
+    return token_count, 10240
+
+
+def _specforge_ingest(port: int) -> dict[str, Any]:
+    command = [
+        "python",
+        "/opt/aurorapp/specforge_ingest_probe.py",
+        "--base-url",
+        f"http://127.0.0.1:{port}",
+    ]
+    completed = subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    marker = "AURORAPP_RESULT="
+    result_lines = [
+        line.removeprefix(marker)
+        for line in completed.stdout.splitlines()
+        if line.startswith(marker)
+    ]
+    if completed.returncode != 0 or len(result_lines) != 1:
+        return {
+            "passed": False,
+            "command": command,
+            "returncode": completed.returncode,
+            "stdout": completed.stdout,
+            "stderr": completed.stderr,
+            "error": "SpecForge ingest subprocess did not return one result",
+        }
+    try:
+        result = json.loads(result_lines[0])
+        token_count, feature_width = validate_specforge_ingest_result(
+            result,
+            [1, 2, 3, 4],
+            [0, 0, 1, 1],
+        )
+    except (json.JSONDecodeError, TypeError, ValueError) as error:
+        return {
+            "passed": False,
+            "command": command,
+            "returncode": completed.returncode,
+            "stdout": completed.stdout,
+            "stderr": completed.stderr,
+            "error": str(error),
+        }
+    return {
+        "passed": True,
+        "command": command,
+        "returncode": completed.returncode,
+        "stdout": completed.stdout,
+        "stderr": completed.stderr,
+        "result": result,
+        "token_count": token_count,
+        "feature_width": feature_width,
+    }
+
+
 def _port_is_closed(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client:
         client.settimeout(1)
@@ -422,8 +553,12 @@ def _server_probe(speculative: bool, repository_revision: str) -> dict[str, Any]
     }
 
 
-def _capture_server_probe(repository_revision: str) -> dict[str, Any]:
-    port = 32000
+def _capture_server_probe(
+    repository_revision: str,
+    *,
+    specforge_ingest: bool = False,
+) -> dict[str, Any]:
+    port = 33000 if specforge_ingest else 32000
     os.environ.update(
         {
             "MOONCAKE_MASTER_SERVER_ADDR": "127.0.0.1:50051",
@@ -477,13 +612,13 @@ def _capture_server_probe(repository_revision: str) -> dict[str, Any]:
         text=True,
         start_new_session=True,
     )
-    capture: dict[str, Any] = {"passed": False, "error": "capture did not run"}
+    workload: dict[str, Any] = {"passed": False, "error": "capture did not run"}
     server_healthy = False
     error: dict[str, str] | None = None
     try:
         _wait_for_server(port, process, timeout=900)
         server_healthy = True
-        capture = _capture_generate(port)
+        workload = _specforge_ingest(port) if specforge_ingest else _capture_generate(port)
     except Exception as exception:
         error = {"type": type(exception).__name__, "message": str(exception)}
     finally:
@@ -501,13 +636,13 @@ def _capture_server_probe(repository_revision: str) -> dict[str, Any]:
     return {
         "status": (
             "passed"
-            if server_healthy and capture.get("passed") is True and cleanup_passed
+            if server_healthy and workload.get("passed") is True and cleanup_passed
             else "failed"
         ),
         "hardware": _hardware_identity(),
         "runtime": _runtime_identity(repository_revision),
         "server_healthy": server_healthy,
-        "capture": capture,
+        "ingest" if specforge_ingest else "capture": workload,
         "launch_command": command,
         "error": error,
         "cleanup": {"server": server_cleanup, "mooncake": master_cleanup},
@@ -556,6 +691,19 @@ def laguna_dflash_capture_probe(repository_revision: str) -> dict[str, Any]:
     return _capture_server_probe(repository_revision)
 
 
+@app.function(
+    image=specforge_image,
+    gpu="H100!",
+    timeout=1800,
+    volumes={"/root/.cache/huggingface": model_cache},
+    single_use_containers=True,
+    restrict_modal_access=True,
+    name="specforge-batch-ingest-probe",
+)
+def specforge_batch_ingest_probe(repository_revision: str) -> dict[str, Any]:
+    return _capture_server_probe(repository_revision, specforge_ingest=True)
+
+
 @app.local_entrypoint()
 def main(probe: str = "identity", output: str = "", allow_dirty: bool = False) -> None:
     revision = _local_repository_revision(allow_dirty)
@@ -568,8 +716,10 @@ def main(probe: str = "identity", output: str = "", allow_dirty: bool = False) -
             result = official_dflash_probe.remote(revision)
         elif probe == "capture":
             result = laguna_dflash_capture_probe.remote(revision)
+        elif probe == "ingest":
+            result = specforge_batch_ingest_probe.remote(revision)
         else:
-            raise ValueError("probe must be identity, target, dflash, or capture")
+            raise ValueError("probe must be identity, target, dflash, capture, or ingest")
         remote_status = result.get("status") if isinstance(result, dict) else None
         record: dict[str, Any] = {
             "probe": probe,
@@ -577,7 +727,9 @@ def main(probe: str = "identity", output: str = "", allow_dirty: bool = False) -
             "result": result,
             "repository_revision": revision,
             "modal_image_id": (
-                sglang_image.object_id if probe != "identity" else base_image.object_id
+                (specforge_image.object_id if probe == "ingest" else sglang_image.object_id)
+                if probe != "identity"
+                else base_image.object_id
             ),
         }
     except Exception as error:
