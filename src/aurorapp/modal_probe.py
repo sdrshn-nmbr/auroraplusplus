@@ -10,7 +10,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import modal
 
@@ -26,7 +26,9 @@ from aurorapp.model_port import (
     SampledOutput,
     SampledRngParityResult,
     SampledSeedParity,
+    SampledSeedRepeatability,
     SpeculativeTelemetry,
+    TargetSamplingDeterminismResult,
     TokenizerTemplateIdentityResult,
     candidate_serving_from_probe_payload,
 )
@@ -969,6 +971,7 @@ def _sampled_serving_arm(
     *,
     port: int,
     speculative_draft_path: str | None,
+    moe_runner_backend: str | None = None,
 ) -> dict[str, Any]:
     command = [
         "python",
@@ -1000,6 +1003,10 @@ def _sampled_serving_arm(
         "--port",
         str(port),
     ]
+    if moe_runner_backend is not None:
+        if moe_runner_backend != "triton":
+            raise ValueError("sampled determinism probe supports only the triton override")
+        command.extend(["--moe-runner-backend", moe_runner_backend])
     if speculative_draft_path is not None:
         command.extend(
             [
@@ -1219,6 +1226,71 @@ def _sampled_rng_parity_probe(
         "target_arm": target_arm,
         "candidate_arm": candidate_arm,
         "cleanup_passed": (target_arm["cleanup_passed"] and candidate_arm["cleanup_passed"]),
+    }
+
+
+def _validated_moe_runner_backend(value: str) -> Literal["auto", "triton"]:
+    if value == "auto":
+        return "auto"
+    if value == "triton":
+        return "triton"
+    raise ValueError("moe runner backend must be auto or triton")
+
+
+def _target_sampling_determinism_probe(
+    repository_revision: str,
+    moe_runner_backend: str,
+) -> dict[str, Any]:
+    backend = _validated_moe_runner_backend(moe_runner_backend)
+    backend_override = None if backend == "auto" else backend
+    target_arm = _sampled_serving_arm(
+        port=37000,
+        speculative_draft_path=None,
+        moe_runner_backend=backend_override,
+    )
+    try:
+        cases = tuple(
+            SampledSeedRepeatability(
+                sampling_seed=seed,
+                repetitions=_sampled_output_pair(target_arm["generations"][str(seed)]),
+            )
+            for seed in SAMPLED_GENERATION_SEEDS
+        )
+        result = TargetSamplingDeterminismResult(
+            target_repository=TARGET_REPOSITORY,
+            target_revision=TARGET_REVISION,
+            request_contract_hash=canonical_sha256(
+                [
+                    sampled_generation_request(
+                        "Write a Python function that adds two tensors.",
+                        max_new_tokens=32,
+                        sampling_seed=seed,
+                    )
+                    for seed in SAMPLED_GENERATION_SEEDS
+                ]
+            ),
+            moe_runner_backend=backend,
+            deterministic_inference_enabled=True,
+            radix_cache_disabled=True,
+            cases=cases,
+            server_healthy=target_arm["server_healthy"],
+            cleanup_passed=target_arm["cleanup_passed"],
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        return {
+            "status": "failed",
+            "hardware": _hardware_identity(),
+            "runtime": _runtime_identity(repository_revision),
+            "target_arm": target_arm,
+            "error": {"type": type(error).__name__, "message": str(error)},
+        }
+    return {
+        "status": "passed" if result.passed else "failed",
+        "hardware": _hardware_identity(),
+        "runtime": _runtime_identity(repository_revision),
+        "result": result.model_dump(mode="json"),
+        "target_arm": target_arm,
+        "cleanup_passed": target_arm["cleanup_passed"],
     }
 
 
@@ -1564,6 +1636,25 @@ def tokenizer_template_identity_probe(repository_revision: str) -> dict[str, Any
     image=sglang_image,
     gpu="H100!",
     timeout=2400,
+    volumes={"/root/.cache/huggingface": model_cache},
+    single_use_containers=True,
+    restrict_modal_access=True,
+    name="target-sampling-determinism-probe",
+)
+def target_sampling_determinism_probe(
+    repository_revision: str,
+    moe_runner_backend: str,
+) -> dict[str, Any]:
+    return _target_sampling_determinism_probe(
+        repository_revision,
+        moe_runner_backend,
+    )
+
+
+@app.function(
+    image=sglang_image,
+    gpu="H100!",
+    timeout=2400,
     volumes={
         "/root/.cache/huggingface": model_cache,
         "/checkpoints": checkpoint_volume,
@@ -1743,6 +1834,7 @@ def main(
     checkpoint_manifest_hash: str = "",
     checkpoint_weights_hash: str = "",
     candidate_serving_evidence: str = "",
+    moe_runner_backend: str = "triton",
 ) -> None:
     revision = _local_repository_revision(allow_dirty)
     try:
@@ -1793,6 +1885,13 @@ def main(
                 checkpoint_manifest_hash,
                 checkpoint_weights_hash,
             )
+        elif probe == "target-sampling-determinism":
+            if moe_runner_backend not in {"auto", "triton"}:
+                raise ValueError("moe-runner-backend must be auto or triton")
+            result = target_sampling_determinism_probe.remote(
+                revision,
+                moe_runner_backend,
+            )
         elif probe == "parent-restore":
             if not candidate_serving_evidence:
                 raise ValueError("parent-restore requires --candidate-serving-evidence")
@@ -1816,7 +1915,8 @@ def main(
             raise ValueError(
                 "probe must be identity, target, dflash, capture, ingest, "
                 "model-port, captured-optimizer, reload-diagnostic, candidate-serving, "
-                "tokenizer-identity, sampled-rng, or parent-restore"
+                "tokenizer-identity, sampled-rng, target-sampling-determinism, "
+                "or parent-restore"
             )
         remote_status = result.get("status") if isinstance(result, dict) else None
         record: dict[str, Any] = {

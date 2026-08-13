@@ -92,7 +92,8 @@ def test_mooncake_replay_envelope_binds_all_derived_training_inputs() -> None:
         )
 
 
-def test_sampled_probe_disables_shared_prefix_state(monkeypatch) -> None:
+@pytest.mark.parametrize("moe_runner_backend", [None, "triton"])
+def test_sampled_probe_binds_deterministic_runtime(monkeypatch, moe_runner_backend) -> None:
     commands = []
 
     def start(command):
@@ -102,10 +103,19 @@ def test_sampled_probe_disables_shared_prefix_state(monkeypatch) -> None:
     monkeypatch.setattr("aurorapp.modal_probe._start_logged_process", start)
 
     with pytest.raises(RuntimeError, match="command construction"):
-        _sampled_serving_arm(port=30000, speculative_draft_path=None)
+        _sampled_serving_arm(
+            port=30000,
+            speculative_draft_path=None,
+            moe_runner_backend=moe_runner_backend,
+        )
 
     assert "--disable-radix-cache" in commands[0]
     assert "--enable-deterministic-inference" in commands[0]
+    if moe_runner_backend is None:
+        assert "--moe-runner-backend" not in commands[0]
+    else:
+        index = commands[0].index("--moe-runner-backend")
+        assert commands[0][index + 1] == moe_runner_backend
 
 
 def test_dflash_capture_contract_requires_all_official_laguna_layers() -> None:

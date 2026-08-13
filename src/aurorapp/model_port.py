@@ -79,6 +79,56 @@ class SampledOutput(StrictModel):
     finish_reason: GenerationFinishReason
 
 
+class SampledSeedRepeatability(StrictModel):
+    sampling_seed: int = Field(ge=0)
+    repetitions: tuple[SampledOutput, SampledOutput]
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def repeatable(self) -> bool:
+        return self.repetitions[0] == self.repetitions[1]
+
+
+class TargetSamplingDeterminismResult(StrictModel):
+    target_repository: str = Field(min_length=1)
+    target_revision: GitRevision
+    request_contract_hash: Sha256
+    moe_runner_backend: Literal["auto", "triton"]
+    deterministic_inference_enabled: bool
+    radix_cache_disabled: bool
+    cases: tuple[SampledSeedRepeatability, ...] = Field(min_length=2)
+    server_healthy: bool
+    cleanup_passed: bool
+
+    @model_validator(mode="after")
+    def seeds_are_unique(self) -> "TargetSamplingDeterminismResult":
+        seeds = [case.sampling_seed for case in self.cases]
+        if len(set(seeds)) != len(seeds):
+            raise ValueError("target determinism cases must use unique seeds")
+        return self
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def outputs_vary_across_seeds(self) -> bool:
+        outputs = {
+            (case.repetitions[0].output_ids, case.repetitions[0].text)
+            for case in self.cases
+        }
+        return len(outputs) > 1
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def passed(self) -> bool:
+        return (
+            self.deterministic_inference_enabled
+            and self.radix_cache_disabled
+            and self.server_healthy
+            and self.cleanup_passed
+            and self.outputs_vary_across_seeds
+            and all(case.repeatable for case in self.cases)
+        )
+
+
 class SampledSeedParity(StrictModel):
     sampling_seed: int = Field(ge=0)
     target: tuple[SampledOutput, SampledOutput]

@@ -15,6 +15,8 @@ from aurorapp.model_port import (
     SampledOutput,
     SampledRngParityResult,
     SampledSeedParity,
+    SampledSeedRepeatability,
+    TargetSamplingDeterminismResult,
     TokenizerTemplateIdentityResult,
     candidate_serving_from_probe_payload,
     checkpoint_contract,
@@ -128,6 +130,33 @@ def sampled_output(token: int, text: str) -> SampledOutput:
         text=text,
         finish_reason={"type": "length", "length": 2},
     )
+
+
+def test_target_sampling_determinism_is_a_separate_typed_gate() -> None:
+    cases = tuple(
+        SampledSeedRepeatability(
+            sampling_seed=seed,
+            repetitions=(sampled_output(seed, f"answer-{seed}"),) * 2,
+        )
+        for seed in (17, 42, 20260812)
+    )
+    result = TargetSamplingDeterminismResult(
+        target_repository="poolside/Laguna-XS-2.1-INT4",
+        target_revision="4b7e28abdc0a8b121def816b89d631750bc53c92",
+        request_contract_hash="a" * 64,
+        moe_runner_backend="triton",
+        deterministic_inference_enabled=True,
+        radix_cache_disabled=True,
+        cases=cases,
+        server_healthy=True,
+        cleanup_passed=True,
+    )
+
+    assert result.passed
+    changed = cases[0].model_copy(
+        update={"repetitions": (cases[0].repetitions[0], sampled_output(99, "changed"))}
+    )
+    assert not result.model_copy(update={"cases": (changed, *cases[1:])}).passed
 
 
 def test_sampled_rng_gate_requires_repeatability_parity_and_real_sampling() -> None:
