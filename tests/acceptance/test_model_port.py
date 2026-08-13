@@ -184,3 +184,23 @@ def test_reload_diagnostic_does_not_replace_exact_parity_with_allclose() -> None
     )
 
     assert result.passed is False
+
+
+def test_reload_diagnostic_wire_record_excludes_computed_passed_field() -> None:
+    result = CheckpointReloadResult(
+        missing=(),
+        unexpected=(),
+        state_digest="a" * 64,
+        reference_state_digest="a" * 64,
+        state_equal=True,
+        output_equal=True,
+        output_allclose=True,
+        output_mismatch_count=0,
+        output_max_abs_difference=0,
+        output_mean_abs_difference=0,
+    )
+
+    encoded = result.model_dump_json(exclude={"passed"})
+
+    assert '"passed"' not in encoded
+    assert CheckpointReloadResult.model_validate_json(encoded).passed is True

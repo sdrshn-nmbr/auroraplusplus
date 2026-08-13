@@ -146,7 +146,10 @@ def reload_checkpoint(checkpoint: Path, reference_path: Path) -> None:
     del model, expected, observed, difference, reference
     gc.collect()
     torch.cuda.empty_cache()
-    print("AURORAPP_RELOAD_RESULT=" + result.model_dump_json(), flush=True)
+    print(
+        "AURORAPP_RELOAD_RESULT=" + result.model_dump_json(exclude={"passed"}),
+        flush=True,
+    )
 
 
 def feature_store() -> MooncakeFeatureStore:
