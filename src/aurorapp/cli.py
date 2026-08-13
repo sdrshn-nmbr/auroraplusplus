@@ -34,6 +34,7 @@ from aurorapp.models import (
 from aurorapp.schema import write_schemas
 from aurorapp.signatures import ApprovalSigner
 from aurorapp.source_probe import run_capture_patch_probe
+from aurorapp.training_probe import run_training_model_probe
 
 app = typer.Typer(no_args_is_help=True, help="Aurora++ control and audit CLI.")
 config_app = typer.Typer(no_args_is_help=True)
@@ -173,6 +174,16 @@ def probe_source_compatibility(
         staged,
         loader=lambda path: bool(json.loads(path.read_text(encoding="utf-8"))),
     )
+    training_model_result = run_training_model_probe(Path.cwd())
+    training_model_staged = artifact_store.stage_bytes(
+        "training-model-compatibility.json",
+        training_model_result.model_dump_json(indent=2).encode() + b"\n",
+        producer="compatibility-training-model-probe",
+    )
+    training_model_artifact = artifact_store.commit(
+        training_model_staged,
+        loader=lambda path: bool(json.loads(path.read_text(encoding="utf-8"))),
+    )
     target = _probe_artifact(evidence_directory / "target-only-seeded.json")
     dflash = _probe_artifact(evidence_directory / "official-dflash-seeded.json")
     capture = _passing_probe_artifact(
@@ -189,6 +200,8 @@ def probe_source_compatibility(
         dflash,
         capture,
         ingest,
+        training_model=training_model_artifact,
+        training_model_compatible=training_model_result.compatible,
     )
     report = CompatibilityReport(
         identity_kind="draft",
@@ -205,6 +218,7 @@ def probe_source_compatibility(
         (dflash, "dflash-serving"),
         (capture, "target-hidden-state-capture"),
         (ingest, "specforge-batch-ingest"),
+        (training_model_artifact, "training-model-compatibility"),
     )
     for item, kind in probe_artifacts:
         if item is not None:
@@ -217,6 +231,7 @@ def probe_source_compatibility(
                 result.upstream_incompatibility_verified
             ),
             "ported_patch_applies": result.ported_patch.applies_cleanly,
+            "training_model_compatible": training_model_result.compatible,
             "report_hash": report_hash,
             "status": "blocked",
         }
@@ -230,6 +245,9 @@ def _build_source_compatibility_steps(
     dflash: ArtifactRef | None,
     capture: ArtifactRef | None,
     ingest: ArtifactRef | None,
+    *,
+    training_model: ArtifactRef | None = None,
+    training_model_compatible: bool | None = None,
 ) -> tuple[CompatibilityStepResult, ...]:
     steps: list[CompatibilityStepResult] = []
     for name in COMPATIBILITY_LADDER:
@@ -268,6 +286,17 @@ def _build_source_compatibility_steps(
             detail = (
                 "SpecForge materialized exact DFlash tensors, drained the release "
                 "queue, bounded helper shutdown, and cleaned all resources"
+            )
+        elif (
+            name == "bounded-optimizer-step"
+            and training_model is not None
+            and training_model_compatible is False
+        ):
+            status = CompatibilityStatus.FAILED
+            evidence = (training_model,)
+            detail = (
+                "official Laguna DFlash uses DFlashLagunaForCausalLM, while pinned "
+                "SpecForge registers only its Qwen3-specific DFlashDraftModel"
             )
         steps.append(
             CompatibilityStepResult(

@@ -160,15 +160,19 @@ def test_source_report_binds_passing_specforge_ingest_evidence() -> None:
             storage_path=f"objects/{index}",
             validation_result="valid",
         )
-        for index in range(1, 6)
+        for index in range(1, 7)
     ]
 
-    steps = _build_source_compatibility_steps(*items)
+    steps = _build_source_compatibility_steps(
+        *items[:5],
+        training_model=items[5],
+        training_model_compatible=False,
+    )
     ingest = steps[COMPATIBILITY_LADDER.index("specforge-batch-ingest")]
 
     assert ingest.status is CompatibilityStatus.PASSED
     assert ingest.evidence_level is EvidenceLevel.PHYSICAL_GPU
-    assert ingest.evidence == (items[-1],)
-    assert steps[COMPATIBILITY_LADDER.index("bounded-optimizer-step")].status is (
-        CompatibilityStatus.NOT_RUN
-    )
+    assert ingest.evidence == (items[4],)
+    optimizer = steps[COMPATIBILITY_LADDER.index("bounded-optimizer-step")]
+    assert optimizer.status is CompatibilityStatus.FAILED
+    assert optimizer.evidence == (items[5],)
