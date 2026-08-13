@@ -195,6 +195,8 @@ def test_source_report_binds_passing_specforge_ingest_evidence() -> None:
 
     steps = _build_source_compatibility_steps(
         *items[:5],
+        tokenizer_identity=items[0],
+        sampled_rng=items[1],
         training_model=items[5],
         captured_optimizer=items[5],
         candidate_serving=items[6],
@@ -203,6 +205,13 @@ def test_source_report_binds_passing_specforge_ingest_evidence() -> None:
         training_model_port_ready=True,
     )
     ingest = steps[COMPATIBILITY_LADDER.index("specforge-batch-ingest")]
+
+    tokenizer = steps[COMPATIBILITY_LADDER.index("tokenizer-template-identity")]
+    assert tokenizer.status is CompatibilityStatus.PASSED
+    assert tokenizer.evidence == (items[0],)
+    sampled = steps[COMPATIBILITY_LADDER.index("sampled-rng-contract")]
+    assert sampled.status is CompatibilityStatus.PASSED
+    assert sampled.evidence == (items[1],)
 
     assert ingest.status is CompatibilityStatus.PASSED
     assert ingest.evidence_level is EvidenceLevel.PHYSICAL_GPU

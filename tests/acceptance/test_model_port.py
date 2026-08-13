@@ -12,6 +12,10 @@ from aurorapp.model_port import (
     LagunaDFlashConfigContract,
     ParentDrafterRestoreResult,
     PhysicalModelPortResult,
+    SampledOutput,
+    SampledRngParityResult,
+    SampledSeedParity,
+    TokenizerTemplateIdentityResult,
     candidate_serving_from_probe_payload,
     checkpoint_contract,
     draft_runtime_config,
@@ -116,6 +120,107 @@ def test_parent_restore_requires_original_output_and_real_dflash_work() -> None:
 
     assert result.passed is True
     assert result.model_copy(update={"parent_output_ids": (9, 9)}).passed is False
+
+
+def sampled_output(token: int, text: str) -> SampledOutput:
+    return SampledOutput(
+        output_ids=(token, token + 1),
+        text=text,
+        finish_reason={"type": "length", "length": 2},
+    )
+
+
+def test_sampled_rng_gate_requires_repeatability_parity_and_real_sampling() -> None:
+    cases = tuple(
+        SampledSeedParity(
+            sampling_seed=seed,
+            target=(sampled_output(seed, f"answer-{seed}"),) * 2,
+            candidate=(sampled_output(seed, f"answer-{seed}"),) * 2,
+        )
+        for seed in (17, 42, 20260812)
+    )
+    result = SampledRngParityResult(
+        target_repository="poolside/Laguna-XS-2.1-INT4",
+        target_revision="1" * 40,
+        parent_draft_repository="poolside/Laguna-XS-2.1-DFlash-INT4",
+        parent_draft_revision="2" * 40,
+        candidate_checkpoint_path="/checkpoints/objects/candidate",
+        candidate_manifest_hash="3" * 64,
+        candidate_weights_hash="4" * 64,
+        request_contract_hash="5" * 64,
+        deterministic_inference_enabled=True,
+        cases=cases,
+        speculative_telemetry={
+            "proposed_drafts": 32,
+            "accepted_drafts": 4,
+            "verify_count": 3,
+            "accept_histogram": [1, 1, 1],
+        },
+        target_server_healthy=True,
+        candidate_server_healthy=True,
+        target_cleanup_passed=True,
+        candidate_cleanup_passed=True,
+    )
+
+    assert result.passed is True
+    assert result.outputs_vary_across_seeds is True
+
+    nonrepeatable = cases[0].model_copy(
+        update={"target": (cases[0].target[0], sampled_output(99, "changed"))}
+    )
+    assert result.model_copy(update={"cases": (nonrepeatable, *cases[1:])}).passed is False
+
+    mismatch = cases[0].model_copy(update={"candidate": (sampled_output(98, "wrong"),) * 2})
+    assert result.model_copy(update={"cases": (mismatch, *cases[1:])}).passed is False
+
+    identical = tuple(
+        case.model_copy(
+            update={
+                "target": (sampled_output(1, "same"),) * 2,
+                "candidate": (sampled_output(1, "same"),) * 2,
+            }
+        )
+        for case in cases
+    )
+    assert result.model_copy(update={"cases": identical}).passed is False
+
+
+def test_tokenizer_template_identity_requires_pinned_files_and_shared_runtime() -> None:
+    result = TokenizerTemplateIdentityResult(
+        target_repository="poolside/Laguna-XS-2.1-INT4",
+        target_revision="1" * 40,
+        parent_draft_repository="poolside/Laguna-XS-2.1-DFlash-INT4",
+        parent_draft_revision="2" * 40,
+        target_tokenizer_file_hashes={
+            "chat_template.jinja": "a" * 64,
+            "special_tokens_map.json": "b" * 64,
+            "tokenizer.json": "c" * 64,
+            "tokenizer_config.json": "d" * 64,
+        },
+        expected_target_tokenizer_file_hashes={
+            "chat_template.jinja": "a" * 64,
+            "special_tokens_map.json": "b" * 64,
+            "tokenizer.json": "c" * 64,
+            "tokenizer_config.json": "d" * 64,
+        },
+        draft_repository_files=("config.json", "model.safetensors"),
+        draft_tokenizer_overrides=(),
+        loaded_chat_template_hash="a" * 64,
+        vocabulary_hash="e" * 64,
+        rendered_prompt_hash="f" * 64,
+        rendered_token_ids_hash="1" * 64,
+        vocabulary_size=128,
+        tokenizer_length=130,
+        special_token_ids={"eos_token_id": 2},
+        runtime_tokenizer_path="poolside/Laguna-XS-2.1-INT4",
+        draft_worker_skips_tokenizer=True,
+        sglang_tokenizer_source_hash="2" * 64,
+    )
+
+    assert result.passed is True
+    with_override = result.model_copy(update={"draft_tokenizer_overrides": ("tokenizer.json",)})
+    assert with_override.passed is False
+    assert result.model_copy(update={"loaded_chat_template_hash": "9" * 64}).passed is False
 
 
 def test_training_wrapper_does_not_cast_nonpersistent_model_buffers() -> None:

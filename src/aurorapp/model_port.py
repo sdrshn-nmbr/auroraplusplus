@@ -73,6 +73,117 @@ class CandidateSpeculativeServingResult(StrictModel):
         )
 
 
+class SampledOutput(StrictModel):
+    output_ids: tuple[int, ...] = Field(min_length=1)
+    text: str
+    finish_reason: GenerationFinishReason
+
+
+class SampledSeedParity(StrictModel):
+    sampling_seed: int = Field(ge=0)
+    target: tuple[SampledOutput, SampledOutput]
+    candidate: tuple[SampledOutput, SampledOutput]
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def target_repeatable(self) -> bool:
+        return self.target[0] == self.target[1]
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def candidate_repeatable(self) -> bool:
+        return self.candidate[0] == self.candidate[1]
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def target_candidate_equal(self) -> bool:
+        return self.target[0] == self.candidate[0]
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def passed(self) -> bool:
+        return self.target_repeatable and self.candidate_repeatable and self.target_candidate_equal
+
+
+class SampledRngParityResult(StrictModel):
+    target_repository: str = Field(min_length=1)
+    target_revision: GitRevision
+    parent_draft_repository: str = Field(min_length=1)
+    parent_draft_revision: GitRevision
+    candidate_checkpoint_path: str = Field(min_length=1)
+    candidate_manifest_hash: Sha256
+    candidate_weights_hash: Sha256
+    request_contract_hash: Sha256
+    deterministic_inference_enabled: bool
+    cases: tuple[SampledSeedParity, ...] = Field(min_length=2)
+    speculative_telemetry: SpeculativeTelemetry
+    target_server_healthy: bool
+    candidate_server_healthy: bool
+    target_cleanup_passed: bool
+    candidate_cleanup_passed: bool
+
+    @model_validator(mode="after")
+    def seeds_are_unique(self) -> "SampledRngParityResult":
+        seeds = [case.sampling_seed for case in self.cases]
+        if len(set(seeds)) != len(seeds):
+            raise ValueError("sampled parity cases must use unique seeds")
+        return self
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def outputs_vary_across_seeds(self) -> bool:
+        outputs = {(case.target[0].output_ids, case.target[0].text) for case in self.cases}
+        return len(outputs) > 1
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def passed(self) -> bool:
+        return (
+            self.deterministic_inference_enabled
+            and self.target_server_healthy
+            and self.candidate_server_healthy
+            and self.target_cleanup_passed
+            and self.candidate_cleanup_passed
+            and self.speculative_telemetry.passed
+            and self.outputs_vary_across_seeds
+            and all(case.passed for case in self.cases)
+        )
+
+
+class TokenizerTemplateIdentityResult(StrictModel):
+    target_repository: str = Field(min_length=1)
+    target_revision: GitRevision
+    parent_draft_repository: str = Field(min_length=1)
+    parent_draft_revision: GitRevision
+    target_tokenizer_file_hashes: dict[str, Sha256] = Field(min_length=1)
+    expected_target_tokenizer_file_hashes: dict[str, Sha256] = Field(min_length=1)
+    draft_repository_files: tuple[str, ...] = Field(min_length=1)
+    draft_tokenizer_overrides: tuple[str, ...]
+    loaded_chat_template_hash: Sha256
+    vocabulary_hash: Sha256
+    rendered_prompt_hash: Sha256
+    rendered_token_ids_hash: Sha256
+    vocabulary_size: int = Field(gt=0)
+    tokenizer_length: int = Field(gt=0)
+    special_token_ids: dict[str, int] = Field(min_length=1)
+    runtime_tokenizer_path: str = Field(min_length=1)
+    draft_worker_skips_tokenizer: bool
+    sglang_tokenizer_source_hash: Sha256
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def passed(self) -> bool:
+        template_hash = self.target_tokenizer_file_hashes.get("chat_template.jinja")
+        return (
+            self.target_tokenizer_file_hashes == self.expected_target_tokenizer_file_hashes
+            and not self.draft_tokenizer_overrides
+            and template_hash == self.loaded_chat_template_hash
+            and self.runtime_tokenizer_path == self.target_repository
+            and self.draft_worker_skips_tokenizer
+            and self.tokenizer_length >= self.vocabulary_size
+        )
+
+
 class ParentDrafterRestoreResult(StrictModel):
     candidate_serving_evidence_hash: Sha256
     candidate_manifest_hash: Sha256

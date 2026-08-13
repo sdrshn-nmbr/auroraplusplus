@@ -17,7 +17,12 @@ from aurorapp.modal_probe import (
     validate_dflash_capture_result,
     validate_specforge_ingest_result,
 )
-from aurorapp.sglang_contract import SGLANG_SERVER_RANDOM_SEED, greedy_generation_request
+from aurorapp.sglang_contract import (
+    SAMPLED_GENERATION_SEEDS,
+    SGLANG_SERVER_RANDOM_SEED,
+    greedy_generation_request,
+    sampled_generation_request,
+)
 
 
 def test_pinned_raw_sglang_greedy_request_does_not_send_unsupported_seed() -> None:
@@ -25,6 +30,20 @@ def test_pinned_raw_sglang_greedy_request_does_not_send_unsupported_seed() -> No
 
     assert request["sampling_params"] == {"temperature": 0, "max_new_tokens": 32}
     assert SGLANG_SERVER_RANDOM_SEED == 20260812
+
+
+def test_pinned_raw_sglang_sampled_request_uses_request_sampling_seed() -> None:
+    request = sampled_generation_request("hello", 32, sampling_seed=17)
+
+    assert request["sampling_params"] == {
+        "temperature": 0.8,
+        "top_p": 0.95,
+        "max_new_tokens": 32,
+        "sampling_seed": 17,
+    }
+    assert "seed" not in request["sampling_params"]
+    assert len(SAMPLED_GENERATION_SEEDS) == 3
+    assert len(set(SAMPLED_GENERATION_SEEDS)) == 3
 
 
 def test_dflash_capture_contract_requires_all_official_laguna_layers() -> None:

@@ -23,10 +23,20 @@ from aurorapp.model_port import (
     CheckpointReloadResult,
     ParentDrafterRestoreResult,
     PhysicalModelPortResult,
+    SampledOutput,
+    SampledRngParityResult,
+    SampledSeedParity,
+    SpeculativeTelemetry,
+    TokenizerTemplateIdentityResult,
     candidate_serving_from_probe_payload,
 )
 from aurorapp.models import ArtifactRef
-from aurorapp.sglang_contract import SGLANG_SERVER_RANDOM_SEED, greedy_generation_request
+from aurorapp.sglang_contract import (
+    SAMPLED_GENERATION_SEEDS,
+    SGLANG_SERVER_RANDOM_SEED,
+    greedy_generation_request,
+    sampled_generation_request,
+)
 
 TARGET_REPOSITORY = "poolside/Laguna-XS-2.1-INT4"
 TARGET_REVISION = "4b7e28abdc0a8b121def816b89d631750bc53c92"
@@ -82,7 +92,11 @@ sglang_runtime_image = (
     )
 )
 
-sglang_image = sglang_runtime_image.add_local_python_source("aurorapp")
+sglang_image = sglang_runtime_image.add_local_file(
+    "scripts/tokenizer_identity_probe.py",
+    "/opt/aurorapp/tokenizer_identity_probe.py",
+    copy=True,
+).add_local_python_source("aurorapp")
 
 specforge_image = (
     sglang_runtime_image.add_local_file(
@@ -201,10 +215,7 @@ def _wait_for_server(port: int, process: subprocess.Popen[str], timeout: int) ->
     raise TimeoutError("SGLang did not become healthy before the compatibility timeout")
 
 
-def _generate(port: int) -> dict[str, Any]:
-    payload = greedy_generation_request(
-        "Write a Python function that adds two tensors.", max_new_tokens=32
-    )
+def _generate_payload(port: int, payload: dict[str, Any]) -> dict[str, Any]:
     request = urllib.request.Request(
         f"http://127.0.0.1:{port}/generate",
         data=canonical_bytes(payload),
@@ -236,6 +247,26 @@ def _generate(port: int) -> dict[str, Any]:
         "response_body": decoded,
         "passed": True,
     }
+
+
+def _generate(port: int) -> dict[str, Any]:
+    return _generate_payload(
+        port,
+        greedy_generation_request(
+            "Write a Python function that adds two tensors.", max_new_tokens=32
+        ),
+    )
+
+
+def _sample_generate(port: int, sampling_seed: int) -> dict[str, Any]:
+    return _generate_payload(
+        port,
+        sampled_generation_request(
+            "Write a Python function that adds two tensors.",
+            max_new_tokens=32,
+            sampling_seed=sampling_seed,
+        ),
+    )
 
 
 def _capture_generate(port: int) -> dict[str, Any]:
@@ -910,6 +941,262 @@ def _candidate_serving_arm(
     }
 
 
+def _sampled_serving_arm(
+    *,
+    port: int,
+    speculative_draft_path: str | None,
+) -> dict[str, Any]:
+    command = [
+        "python",
+        "-m",
+        "sglang.launch_server",
+        "--model-path",
+        TARGET_REPOSITORY,
+        "--revision",
+        TARGET_REVISION,
+        "--trust-remote-code",
+        "--reasoning-parser",
+        "poolside_v1",
+        "--tool-call-parser",
+        "poolside_v1",
+        "--tp",
+        "1",
+        "--attention-backend",
+        "fa3",
+        "--page-size",
+        "1",
+        "--mem-fraction-static",
+        "0.7",
+        "--random-seed",
+        str(SGLANG_SERVER_RANDOM_SEED),
+        "--enable-deterministic-inference",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(port),
+    ]
+    if speculative_draft_path is not None:
+        command.extend(
+            [
+                "--speculative-algorithm",
+                "DFLASH",
+                "--speculative-draft-model-path",
+                speculative_draft_path,
+            ]
+        )
+    process, log_path = _start_logged_process(command)
+    generations: dict[str, list[dict[str, Any]]] = {}
+    server_healthy = False
+    error: dict[str, str] | None = None
+    try:
+        _wait_for_server(port, process, timeout=900)
+        server_healthy = True
+        for sampling_seed in SAMPLED_GENERATION_SEEDS:
+            generations[str(sampling_seed)] = [
+                _sample_generate(port, sampling_seed),
+                _sample_generate(port, sampling_seed),
+            ]
+    except Exception as exception:
+        error = {"type": type(exception).__name__, "message": str(exception)}
+    finally:
+        cleanup = _stop_process_group(process, port)
+        server_log = _read_process_log(log_path)
+    cleanup_passed = (
+        not cleanup["remaining_processes"]
+        and not cleanup["gpu_processes"]
+        and cleanup["port_closed"]
+    )
+    requests_passed = bool(generations) and all(
+        generation.get("passed") is True
+        for repetitions in generations.values()
+        for generation in repetitions
+    )
+    return {
+        "passed": server_healthy and requests_passed and cleanup_passed,
+        "server_healthy": server_healthy,
+        "generations": generations,
+        "launch_command": command,
+        "error": error,
+        "cleanup": cleanup,
+        "cleanup_passed": cleanup_passed,
+        "sglang_log": server_log,
+    }
+
+
+def _tokenizer_template_identity() -> dict[str, Any]:
+    command = [
+        "python",
+        "/opt/aurorapp/tokenizer_identity_probe.py",
+        "--target-repository",
+        TARGET_REPOSITORY,
+        "--target-revision",
+        TARGET_REVISION,
+        "--draft-repository",
+        DRAFT_REPOSITORY,
+        "--draft-revision",
+        DRAFT_REVISION,
+    ]
+    execution = _run_until_terminal_record(
+        command,
+        marker="AURORAPP_TOKENIZER_RESULT=",
+        timeout=600,
+    )
+    records = execution["terminal_records"]
+    if execution["timed_out"] or len(records) != 1:
+        return {
+            "passed": False,
+            "command": command,
+            "execution": execution,
+            "error": "tokenizer identity probe did not return one terminal record",
+        }
+    try:
+        result = TokenizerTemplateIdentityResult.model_validate_json(records[0])
+    except (TypeError, ValueError) as error:
+        return {
+            "passed": False,
+            "command": command,
+            "execution": execution,
+            "error": str(error),
+        }
+    return {
+        "passed": result.passed,
+        "command": command,
+        "execution": execution,
+        "result": result.model_dump(mode="json"),
+    }
+
+
+def _sampled_output(generation: dict[str, Any]) -> SampledOutput:
+    response = generation["response_body"]
+    return SampledOutput.model_validate(
+        {
+            "output_ids": response["output_ids"],
+            "text": response["text"],
+            "finish_reason": response["meta_info"]["finish_reason"],
+        }
+    )
+
+
+def _sampled_output_pair(
+    generations: list[dict[str, Any]],
+) -> tuple[SampledOutput, SampledOutput]:
+    if len(generations) != 2:
+        raise ValueError("sampled RNG contract requires exactly two repetitions")
+    return _sampled_output(generations[0]), _sampled_output(generations[1])
+
+
+def _summed_speculative_telemetry(
+    generations: dict[str, list[dict[str, Any]]],
+) -> SpeculativeTelemetry:
+    proposed = 0
+    accepted = 0
+    verify_count = 0
+    histogram: list[int] = []
+    for repetitions in generations.values():
+        for generation in repetitions:
+            telemetry = _speculative_telemetry(generation["response_body"])
+            proposed += int(telemetry["proposed_drafts"])
+            accepted += int(telemetry["accepted_drafts"])
+            verify_count += int(telemetry["verify_count"])
+            observed = [int(value) for value in telemetry["accept_histogram"]]
+            if len(histogram) < len(observed):
+                histogram.extend([0] * (len(observed) - len(histogram)))
+            for index, value in enumerate(observed):
+                histogram[index] += value
+    return SpeculativeTelemetry(
+        proposed_drafts=proposed,
+        accepted_drafts=accepted,
+        verify_count=verify_count,
+        accept_histogram=tuple(histogram),
+    )
+
+
+def _sampled_rng_parity_probe(
+    repository_revision: str,
+    checkpoint_path: str,
+    manifest_hash: str,
+    weights_hash: str,
+) -> dict[str, Any]:
+    checkpoint = Path(checkpoint_path)
+    if not checkpoint.is_relative_to("/checkpoints/objects"):
+        raise ValueError("candidate checkpoint must be an immutable checkpoint object")
+    observed_manifest_hash = file_sha256(checkpoint / "manifest.json")
+    observed_weights_hash = file_sha256(checkpoint / "model.safetensors")
+    if observed_manifest_hash != manifest_hash:
+        raise ValueError("candidate manifest hash differs from the requested checkpoint")
+    if observed_weights_hash != weights_hash:
+        raise ValueError("candidate weights hash differs from the requested checkpoint")
+
+    target_arm = _sampled_serving_arm(port=37000, speculative_draft_path=None)
+    candidate_arm = _sampled_serving_arm(
+        port=38000,
+        speculative_draft_path=checkpoint_path,
+    )
+    try:
+        cases = tuple(
+            SampledSeedParity(
+                sampling_seed=seed,
+                target=_sampled_output_pair(target_arm["generations"][str(seed)]),
+                candidate=_sampled_output_pair(candidate_arm["generations"][str(seed)]),
+            )
+            for seed in SAMPLED_GENERATION_SEEDS
+        )
+        result = SampledRngParityResult(
+            target_repository=TARGET_REPOSITORY,
+            target_revision=TARGET_REVISION,
+            parent_draft_repository=DRAFT_REPOSITORY,
+            parent_draft_revision=DRAFT_REVISION,
+            candidate_checkpoint_path=checkpoint_path,
+            candidate_manifest_hash=manifest_hash,
+            candidate_weights_hash=weights_hash,
+            request_contract_hash=canonical_sha256(
+                [
+                    sampled_generation_request(
+                        "Write a Python function that adds two tensors.",
+                        max_new_tokens=32,
+                        sampling_seed=seed,
+                    )
+                    for seed in SAMPLED_GENERATION_SEEDS
+                ]
+            ),
+            deterministic_inference_enabled=True,
+            cases=cases,
+            speculative_telemetry=_summed_speculative_telemetry(candidate_arm["generations"]),
+            target_server_healthy=target_arm["server_healthy"],
+            candidate_server_healthy=candidate_arm["server_healthy"],
+            target_cleanup_passed=target_arm["cleanup_passed"],
+            candidate_cleanup_passed=candidate_arm["cleanup_passed"],
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        return {
+            "status": "failed",
+            "hardware": _hardware_identity(),
+            "runtime": _runtime_identity(repository_revision),
+            "checkpoint": {
+                "path": checkpoint_path,
+                "manifest_hash": observed_manifest_hash,
+                "weights_hash": observed_weights_hash,
+            },
+            "target_arm": target_arm,
+            "candidate_arm": candidate_arm,
+            "error": {"type": type(error).__name__, "message": str(error)},
+        }
+    return {
+        "status": "passed" if result.passed else "failed",
+        "hardware": _hardware_identity(),
+        "runtime": _runtime_identity(repository_revision),
+        "checkpoint": {
+            "path": checkpoint_path,
+            "manifest_hash": observed_manifest_hash,
+            "weights_hash": observed_weights_hash,
+        },
+        "result": result.model_dump(mode="json"),
+        "target_arm": target_arm,
+        "candidate_arm": candidate_arm,
+        "cleanup_passed": (target_arm["cleanup_passed"] and candidate_arm["cleanup_passed"]),
+    }
+
+
 def _candidate_serving_result(
     *,
     target_arm: dict[str, Any],
@@ -971,9 +1258,7 @@ def _speculative_telemetry(response: dict[str, Any]) -> dict[str, Any]:
         "proposed_drafts": meta.get(
             "spec_proposed_drafts", meta.get("spec_num_proposed_drafts", 0)
         ),
-        "accepted_drafts": meta.get(
-            "spec_accepted_drafts", meta.get("spec_num_correct_drafts", 0)
-        ),
+        "accepted_drafts": meta.get("spec_accepted_drafts", meta.get("spec_num_correct_drafts", 0)),
         "verify_count": meta.get("spec_verify_ct", 0),
         "accept_histogram": meta.get("spec_accept_histogram", []),
     }
@@ -1087,9 +1372,7 @@ def _candidate_speculative_serving_probe(
         "result": result.model_dump(mode="json"),
         "target_arm": target_arm,
         "candidate_arm": candidate_arm,
-        "cleanup_passed": (
-            target_arm["cleanup_passed"] and candidate_arm["cleanup_passed"]
-        ),
+        "cleanup_passed": (target_arm["cleanup_passed"] and candidate_arm["cleanup_passed"]),
     }
 
 
@@ -1232,6 +1515,29 @@ def official_dflash_probe(repository_revision: str) -> dict[str, Any]:
 @app.function(
     image=sglang_image,
     gpu="H100!",
+    timeout=900,
+    volumes={"/root/.cache/huggingface": model_cache},
+    single_use_containers=True,
+    restrict_modal_access=True,
+    name="tokenizer-template-identity-probe",
+)
+def tokenizer_template_identity_probe(repository_revision: str) -> dict[str, Any]:
+    identity = _tokenizer_template_identity()
+    gpu_processes = _gpu_processes()
+    passed = identity.get("passed") is True and not gpu_processes
+    return {
+        "status": "passed" if passed else "failed",
+        "hardware": _hardware_identity(),
+        "runtime": _runtime_identity(repository_revision),
+        "identity": identity,
+        "cleanup": {"gpu_processes": gpu_processes},
+        "cleanup_passed": not gpu_processes,
+    }
+
+
+@app.function(
+    image=sglang_image,
+    gpu="H100!",
     timeout=2400,
     volumes={
         "/root/.cache/huggingface": model_cache,
@@ -1248,6 +1554,32 @@ def candidate_dflash_serving_probe(
     weights_hash: str,
 ) -> dict[str, Any]:
     return _candidate_speculative_serving_probe(
+        repository_revision,
+        checkpoint_path,
+        manifest_hash,
+        weights_hash,
+    )
+
+
+@app.function(
+    image=sglang_image,
+    gpu="H100!",
+    timeout=2400,
+    volumes={
+        "/root/.cache/huggingface": model_cache,
+        "/checkpoints": checkpoint_volume,
+    },
+    single_use_containers=True,
+    restrict_modal_access=True,
+    name="sampled-rng-parity-probe",
+)
+def sampled_rng_parity_probe(
+    repository_revision: str,
+    checkpoint_path: str,
+    manifest_hash: str,
+    weights_hash: str,
+) -> dict[str, Any]:
+    return _sampled_rng_parity_probe(
         repository_revision,
         checkpoint_path,
         manifest_hash,
@@ -1395,6 +1727,8 @@ def main(
             result = target_only_probe.remote(revision)
         elif probe == "dflash":
             result = official_dflash_probe.remote(revision)
+        elif probe == "tokenizer-identity":
+            result = tokenizer_template_identity_probe.remote(revision)
         elif probe == "capture":
             result = laguna_dflash_capture_probe.remote(revision)
         elif probe == "ingest":
@@ -1423,15 +1757,24 @@ def main(
                 checkpoint_manifest_hash,
                 checkpoint_weights_hash,
             )
+        elif probe == "sampled-rng":
+            if not checkpoint_path:
+                raise ValueError("sampled-rng requires --checkpoint-path")
+            if not checkpoint_manifest_hash or not checkpoint_weights_hash:
+                raise ValueError("sampled-rng requires checkpoint manifest and weights hashes")
+            result = sampled_rng_parity_probe.remote(
+                revision,
+                checkpoint_path,
+                checkpoint_manifest_hash,
+                checkpoint_weights_hash,
+            )
         elif probe == "parent-restore":
             if not candidate_serving_evidence:
                 raise ValueError("parent-restore requires --candidate-serving-evidence")
             candidate_record = json.loads(
                 Path(candidate_serving_evidence).read_text(encoding="utf-8")
             )
-            candidate = candidate_serving_from_probe_payload(
-                candidate_record["result"]["result"]
-            )
+            candidate = candidate_serving_from_probe_payload(candidate_record["result"]["result"])
             if candidate_record.get("status") != "passed" or not candidate.passed:
                 raise ValueError("parent-restore requires passing candidate evidence")
             artifact = ArtifactRef.model_validate(candidate_record["artifact"])
@@ -1448,7 +1791,7 @@ def main(
             raise ValueError(
                 "probe must be identity, target, dflash, capture, ingest, "
                 "model-port, captured-optimizer, reload-diagnostic, candidate-serving, "
-                "or parent-restore"
+                "tokenizer-identity, sampled-rng, or parent-restore"
             )
         remote_status = result.get("status") if isinstance(result, dict) else None
         record: dict[str, Any] = {
@@ -1465,8 +1808,6 @@ def main(
                         "model-port",
                         "captured-optimizer",
                         "reload-diagnostic",
-                        "candidate-serving",
-                        "parent-restore",
                     }
                     else sglang_image.object_id
                 )

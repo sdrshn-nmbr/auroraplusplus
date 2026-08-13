@@ -206,6 +206,14 @@ def probe_source_compatibility(
         evidence_directory / "parent-dflash-restore.json",
         "parent-restore",
     )
+    tokenizer_identity = _passing_probe_artifact(
+        evidence_directory / "tokenizer-template-identity.json",
+        "tokenizer-identity",
+    )
+    sampled_rng = _passing_probe_artifact(
+        evidence_directory / "sampled-rng-parity.json",
+        "sampled-rng",
+    )
     steps = _build_source_compatibility_steps(
         source_artifact,
         target,
@@ -216,6 +224,8 @@ def probe_source_compatibility(
         captured_optimizer=captured_optimizer,
         candidate_serving=candidate_serving,
         parent_restore=parent_restore,
+        tokenizer_identity=tokenizer_identity,
+        sampled_rng=sampled_rng,
         training_model_compatible=training_model_port.upstream.compatible,
         training_model_port_ready=training_model_port.ready_for_physical_probe,
     )
@@ -237,6 +247,8 @@ def probe_source_compatibility(
         (captured_optimizer, "captured-optimizer"),
         (candidate_serving, "candidate-speculative-serving"),
         (parent_restore, "parent-restore-and-cleanup"),
+        (tokenizer_identity, "tokenizer-template-identity"),
+        (sampled_rng, "sampled-rng-contract"),
         (training_model_artifact, "training-model-compatibility"),
     )
     for item, kind in probe_artifacts:
@@ -268,6 +280,8 @@ def _build_source_compatibility_steps(
     captured_optimizer: ArtifactRef | None = None,
     candidate_serving: ArtifactRef | None = None,
     parent_restore: ArtifactRef | None = None,
+    tokenizer_identity: ArtifactRef | None = None,
+    sampled_rng: ArtifactRef | None = None,
     training_model_compatible: bool | None = None,
     training_model_port_ready: bool = False,
 ) -> tuple[CompatibilityStepResult, ...]:
@@ -279,12 +293,28 @@ def _build_source_compatibility_steps(
         detail = "not run after capture compatibility stop"
         if name in {"target-load", "target-only-serving"} and target is not None:
             status, evidence, detail = CompatibilityStatus.PASSED, (target,), "static target probe"
+        elif name == "tokenizer-template-identity" and tokenizer_identity is not None:
+            status = CompatibilityStatus.PASSED
+            evidence = (tokenizer_identity,)
+            evidence_level = EvidenceLevel.PHYSICAL_GPU
+            detail = (
+                "pinned target tokenizer files, loaded chat template, rendered prompt, "
+                "vocabulary, and draft-worker target-tokenizer routing all match"
+            )
         elif name == "official-dflash-load" and dflash is not None:
             status, evidence, detail = CompatibilityStatus.PASSED, (dflash,), "static DFlash probe"
         elif name == "greedy-lossless-parity" and target is not None and dflash is not None:
             status = CompatibilityStatus.PASSED
             evidence = (target, dflash)
             detail = "one request, fixed server seed, exact token and text parity"
+        elif name == "sampled-rng-contract" and sampled_rng is not None:
+            status = CompatibilityStatus.PASSED
+            evidence = (sampled_rng,)
+            evidence_level = EvidenceLevel.PHYSICAL_GPU
+            detail = (
+                "three request seeds repeated twice per arm with deterministic inference, "
+                "exact target/candidate output parity, varied outputs, and real DFlash work"
+            )
         elif name == "target-hidden-state-capture":
             if capture is not None:
                 status = CompatibilityStatus.PASSED
