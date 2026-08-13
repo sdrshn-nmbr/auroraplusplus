@@ -27,7 +27,11 @@ from specforge.runtime.data_plane.mooncake_store import MooncakeFeatureStore
 from specforge.training.strategies.base import DFlashTrainStrategy
 from transformers import AutoConfig
 
-from aurorapp.model_port import CapturedBatchOptimizerResult, CheckpointReloadResult
+from aurorapp.model_port import (
+    CapturedBatchOptimizerResult,
+    CheckpointReferenceResult,
+    CheckpointReloadResult,
+)
 
 INPUT_IDS = [1, 2, 3, 4]
 LOSS_MASK = [0, 0, 1, 1]
@@ -51,6 +55,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint-root", type=Path)
     parser.add_argument("--reload-checkpoint", type=Path)
     parser.add_argument("--reload-reference", type=Path)
+    parser.add_argument("--write-reference", type=Path)
     return parser.parse_args()
 
 
@@ -76,7 +81,20 @@ def deterministic_draft_output(model: torch.nn.Module) -> torch.Tensor:
         ).detach().cpu()
 
 
-def reload_checkpoint(checkpoint: Path, reference_path: Path) -> None:
+def state_digest(model: torch.nn.Module) -> str:
+    digest = hashlib.sha256()
+    for name, tensor in sorted(model.state_dict().items()):
+        digest.update(name.encode())
+        digest.update(b"\0")
+        digest.update(str(tensor.dtype).encode())
+        digest.update(b"\0")
+        digest.update(str(tuple(tensor.shape)).encode())
+        digest.update(b"\0")
+        digest.update(tensor.detach().cpu().contiguous().view(torch.uint8).numpy().tobytes())
+    return digest.hexdigest()
+
+
+def load_checkpoint(checkpoint: Path):
     config = AutoConfig.from_pretrained(checkpoint)
     config._attn_implementation = "eager"
     model, loading = AutoDraftModel.from_pretrained(
@@ -85,18 +103,50 @@ def reload_checkpoint(checkpoint: Path, reference_path: Path) -> None:
         dtype=torch.bfloat16,
         output_loading_info=True,
     )
-    model = model.to("cuda").eval()
-    expected = torch.load(reference_path, map_location="cpu", weights_only=True)
-    observed = deterministic_draft_output(model)
-    result = {
-        "missing": list(loading.get("missing_keys") or ()),
-        "unexpected": list(loading.get("unexpected_keys") or ()),
-        "output_equal": bool(torch.equal(expected, observed)),
-    }
-    del model, expected, observed
+    return model.to("cuda").eval(), loading
+
+
+def write_reference(checkpoint: Path, reference_path: Path) -> None:
+    model, loading = load_checkpoint(checkpoint)
+    if loading.get("missing_keys") or loading.get("unexpected_keys"):
+        raise RuntimeError(f"reference checkpoint load is incomplete: {loading}")
+    digest = state_digest(model)
+    output = deterministic_draft_output(model)
+    torch.save({"output": output, "state_digest": digest}, reference_path)
+    result = CheckpointReferenceResult(
+        state_digest=digest,
+        reference_path=str(reference_path),
+    )
+    del model, output
     gc.collect()
     torch.cuda.empty_cache()
-    print("AURORAPP_RELOAD_RESULT=" + json.dumps(result, sort_keys=True), flush=True)
+    print("AURORAPP_REFERENCE_RESULT=" + result.model_dump_json(), flush=True)
+
+
+def reload_checkpoint(checkpoint: Path, reference_path: Path) -> None:
+    model, loading = load_checkpoint(checkpoint)
+    reference = torch.load(reference_path, map_location="cpu", weights_only=True)
+    expected = reference["output"]
+    expected_state_digest = reference["state_digest"]
+    observed_state_digest = state_digest(model)
+    observed = deterministic_draft_output(model)
+    difference = (expected.float() - observed.float()).abs()
+    result = CheckpointReloadResult(
+        missing=tuple(loading.get("missing_keys") or ()),
+        unexpected=tuple(loading.get("unexpected_keys") or ()),
+        state_digest=observed_state_digest,
+        reference_state_digest=expected_state_digest,
+        state_equal=observed_state_digest == expected_state_digest,
+        output_equal=bool(torch.equal(expected, observed)),
+        output_allclose=bool(torch.allclose(expected, observed, rtol=1e-5, atol=1e-6)),
+        output_mismatch_count=int(torch.count_nonzero(expected != observed).item()),
+        output_max_abs_difference=float(difference.max().item()),
+        output_mean_abs_difference=float(difference.mean().item()),
+    )
+    del model, expected, observed, difference, reference
+    gc.collect()
+    torch.cuda.empty_cache()
+    print("AURORAPP_RELOAD_RESULT=" + result.model_dump_json(), flush=True)
 
 
 def feature_store() -> MooncakeFeatureStore:
@@ -285,9 +335,14 @@ def train(args: argparse.Namespace) -> None:
         )
         optimizer.step()
         delta = float((before - parameters[CHANGED_PARAMETER].detach()).abs().sum().item())
+        training_model.draft_model.eval()
         reference = deterministic_draft_output(training_model.draft_model)
+        reference_state_digest = state_digest(training_model.draft_model)
         reference_path = Path("/tmp") / f"aurorapp-reload-{uuid.uuid4()}.pt"
-        torch.save(reference, reference_path)
+        torch.save(
+            {"output": reference, "state_digest": reference_state_digest},
+            reference_path,
+        )
         checkpoint, checkpoint_hashes = write_checkpoint(
             args.checkpoint_root,
             training_model,
@@ -345,7 +400,7 @@ def train(args: argparse.Namespace) -> None:
             training_cursor=1,
             reload_missing=reload_result.missing,
             reload_unexpected=reload_result.unexpected,
-            reload_output_equal=reload_result.output_equal,
+            reload_output_equal=reload_result.passed,
             released=released,
             release_pending=int(release_drain.get("release_pending", -1)),
         )
@@ -367,6 +422,11 @@ def train(args: argparse.Namespace) -> None:
 
 def main() -> None:
     args = parse_args()
+    if args.write_reference is not None:
+        if args.reload_checkpoint is None:
+            raise ValueError("reference mode requires --reload-checkpoint")
+        write_reference(args.reload_checkpoint, args.write_reference)
+        return
     if args.reload_checkpoint is not None:
         if args.reload_reference is None:
             raise ValueError("reload mode requires --reload-reference")

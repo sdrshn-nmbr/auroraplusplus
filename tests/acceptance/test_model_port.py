@@ -4,6 +4,7 @@ import pytest
 
 from aurorapp.model_port import (
     CapturedBatchOptimizerResult,
+    CheckpointReloadResult,
     LagunaDFlashConfigContract,
     PhysicalModelPortResult,
     checkpoint_contract,
@@ -166,3 +167,20 @@ def test_captured_batch_optimizer_requires_checkpoint_path_at_construction() -> 
                 "release_pending": 0,
             }
         )
+
+
+def test_reload_diagnostic_does_not_replace_exact_parity_with_allclose() -> None:
+    result = CheckpointReloadResult(
+        missing=(),
+        unexpected=(),
+        state_digest="a" * 64,
+        reference_state_digest="a" * 64,
+        state_equal=True,
+        output_equal=False,
+        output_allclose=True,
+        output_mismatch_count=1,
+        output_max_abs_difference=0.001,
+        output_mean_abs_difference=0.0001,
+    )
+
+    assert result.passed is False

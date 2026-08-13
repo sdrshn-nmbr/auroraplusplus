@@ -16,7 +16,12 @@ import modal
 
 from aurorapp.artifacts import ContentAddressedArtifactStore
 from aurorapp.canonical import canonical_bytes
-from aurorapp.model_port import CapturedBatchOptimizerResult, PhysicalModelPortResult
+from aurorapp.model_port import (
+    CapturedBatchOptimizerResult,
+    CheckpointReferenceResult,
+    CheckpointReloadResult,
+    PhysicalModelPortResult,
+)
 from aurorapp.models import ArtifactRef
 from aurorapp.sglang_contract import SGLANG_SERVER_RANDOM_SEED, greedy_generation_request
 
@@ -537,6 +542,82 @@ def _captured_batch_optimizer(port: int) -> dict[str, Any]:
     }
 
 
+def _checkpoint_reload_diagnostic(checkpoint_path: str) -> dict[str, Any]:
+    reference_path = "/tmp/aurorapp-checkpoint-reference.pt"
+    reference_command = [
+        "python",
+        "/opt/aurorapp/specforge_captured_optimizer_probe.py",
+        "--reload-checkpoint",
+        checkpoint_path,
+        "--write-reference",
+        reference_path,
+    ]
+    reference_execution = _run_until_terminal_record(
+        reference_command,
+        marker="AURORAPP_REFERENCE_RESULT=",
+        timeout=600,
+    )
+    reference_records = reference_execution["terminal_records"]
+    if reference_execution["timed_out"] or len(reference_records) != 1:
+        return {
+            "passed": False,
+            "reference_command": reference_command,
+            "reference_execution": reference_execution,
+            "error": "checkpoint reference process did not return one terminal record",
+        }
+    try:
+        reference = CheckpointReferenceResult.model_validate_json(reference_records[0])
+    except (ValueError, TypeError) as error:
+        return {
+            "passed": False,
+            "reference_command": reference_command,
+            "reference_execution": reference_execution,
+            "error": str(error),
+        }
+    reload_command = [
+        "python",
+        "/opt/aurorapp/specforge_captured_optimizer_probe.py",
+        "--reload-checkpoint",
+        checkpoint_path,
+        "--reload-reference",
+        reference_path,
+    ]
+    reload_execution = _run_until_terminal_record(
+        reload_command,
+        marker="AURORAPP_RELOAD_RESULT=",
+        timeout=600,
+    )
+    reload_records = reload_execution["terminal_records"]
+    if reload_execution["timed_out"] or len(reload_records) != 1:
+        return {
+            "passed": False,
+            "reference": reference.model_dump(mode="json"),
+            "reference_execution": reference_execution,
+            "reload_command": reload_command,
+            "reload_execution": reload_execution,
+            "error": "checkpoint reload process did not return one terminal record",
+        }
+    try:
+        reload = CheckpointReloadResult.model_validate_json(reload_records[0])
+    except (ValueError, TypeError) as error:
+        return {
+            "passed": False,
+            "reference": reference.model_dump(mode="json"),
+            "reference_execution": reference_execution,
+            "reload_command": reload_command,
+            "reload_execution": reload_execution,
+            "error": str(error),
+        }
+    return {
+        "passed": reload.passed,
+        "checkpoint_path": checkpoint_path,
+        "reference": reference.model_dump(mode="json"),
+        "reference_execution": reference_execution,
+        "reload": reload.model_dump(mode="json"),
+        "reload_execution": reload_execution,
+    }
+
+
 def _port_is_closed(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client:
         client.settimeout(1)
@@ -957,8 +1038,39 @@ def specforge_laguna_captured_optimizer_probe(
     return _capture_server_probe(repository_revision, captured_optimizer=True)
 
 
+@app.function(
+    image=specforge_image,
+    gpu="H100!",
+    timeout=1200,
+    volumes={"/checkpoints": checkpoint_volume},
+    single_use_containers=True,
+    restrict_modal_access=True,
+    name="specforge-laguna-reload-diagnostic",
+)
+def specforge_laguna_reload_diagnostic(
+    repository_revision: str,
+    checkpoint_path: str,
+) -> dict[str, Any]:
+    diagnostic = _checkpoint_reload_diagnostic(checkpoint_path)
+    gpu_processes = _gpu_processes()
+    passed = diagnostic.get("passed") is True and not gpu_processes
+    return {
+        "status": "passed" if passed else "failed",
+        "hardware": _hardware_identity(),
+        "runtime": _runtime_identity(repository_revision),
+        "diagnostic": diagnostic,
+        "cleanup": {"gpu_processes": gpu_processes},
+        "cleanup_passed": not gpu_processes,
+    }
+
+
 @app.local_entrypoint()
-def main(probe: str = "identity", output: str = "", allow_dirty: bool = False) -> None:
+def main(
+    probe: str = "identity",
+    output: str = "",
+    allow_dirty: bool = False,
+    checkpoint_path: str = "",
+) -> None:
     revision = _local_repository_revision(allow_dirty)
     try:
         if probe == "identity":
@@ -975,10 +1087,17 @@ def main(probe: str = "identity", output: str = "", allow_dirty: bool = False) -
             result = specforge_laguna_model_port_probe.remote(revision)
         elif probe == "captured-optimizer":
             result = specforge_laguna_captured_optimizer_probe.remote(revision)
+        elif probe == "reload-diagnostic":
+            if not checkpoint_path:
+                raise ValueError("reload-diagnostic requires --checkpoint-path")
+            result = specforge_laguna_reload_diagnostic.remote(
+                revision,
+                checkpoint_path,
+            )
         else:
             raise ValueError(
                 "probe must be identity, target, dflash, capture, ingest, "
-                "model-port, or captured-optimizer"
+                "model-port, captured-optimizer, or reload-diagnostic"
             )
         remote_status = result.get("status") if isinstance(result, dict) else None
         record: dict[str, Any] = {
@@ -989,7 +1108,13 @@ def main(probe: str = "identity", output: str = "", allow_dirty: bool = False) -
             "modal_image_id": (
                 (
                     specforge_image.object_id
-                    if probe in {"ingest", "model-port", "captured-optimizer"}
+                    if probe
+                    in {
+                        "ingest",
+                        "model-port",
+                        "captured-optimizer",
+                        "reload-diagnostic",
+                    }
                     else sglang_image.object_id
                 )
                 if probe != "identity"

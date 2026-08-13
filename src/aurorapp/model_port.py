@@ -160,7 +160,34 @@ class CapturedBatchOptimizerResult(StrictModel):
 class CheckpointReloadResult(StrictModel):
     missing: tuple[str, ...]
     unexpected: tuple[str, ...]
+    state_digest: Sha256
+    reference_state_digest: Sha256
+    state_equal: bool
     output_equal: bool
+    output_allclose: bool
+    output_mismatch_count: int = Field(ge=0)
+    output_max_abs_difference: float = Field(ge=0)
+    output_mean_abs_difference: float = Field(ge=0)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def passed(self) -> bool:
+        return (
+            not self.missing
+            and not self.unexpected
+            and self.state_equal
+            and self.state_digest == self.reference_state_digest
+            and self.output_equal
+            and self.output_allclose
+            and self.output_mismatch_count == 0
+            and self.output_max_abs_difference == 0
+            and self.output_mean_abs_difference == 0
+        )
+
+
+class CheckpointReferenceResult(StrictModel):
+    state_digest: Sha256
+    reference_path: str = Field(min_length=1)
 
 
 def checkpoint_contract(
