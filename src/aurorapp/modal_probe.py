@@ -31,7 +31,7 @@ app = modal.App("aurorapp-compatibility")
 
 CUDA_IMAGE = "nvidia/cuda@sha256:6b6617592b94e7dcc6ffbe6d00720eed27bc6e3b4f06b26b93b4070c31f57391"
 runtime_base_image = modal.Image.from_registry(CUDA_IMAGE, add_python="3.12").apt_install(
-    "git", "pciutils"
+    "git", "pciutils", "libcurl4", "libibverbs1", "librdmacm1"
 )
 base_image = runtime_base_image.add_local_python_source("aurorapp")
 
