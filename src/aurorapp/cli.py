@@ -175,10 +175,15 @@ def probe_source_compatibility(
     )
     target = _probe_artifact(evidence_directory / "target-only-seeded.json")
     dflash = _probe_artifact(evidence_directory / "official-dflash-seeded.json")
+    capture = _passing_probe_artifact(
+        evidence_directory / "laguna-dflash-capture.json",
+        "capture",
+    )
     steps: list[CompatibilityStepResult] = []
     for name in COMPATIBILITY_LADDER:
         status = CompatibilityStatus.NOT_RUN
         evidence: tuple[ArtifactRef, ...] = ()
+        evidence_level = EvidenceLevel.REAL_PROCESS
         detail = "not run after capture compatibility stop"
         if name in {"target-load", "target-only-serving"} and target is not None:
             status, evidence, detail = CompatibilityStatus.PASSED, (target,), "static target probe"
@@ -189,17 +194,26 @@ def probe_source_compatibility(
             evidence = (target, dflash)
             detail = "one request, fixed server seed, exact token and text parity"
         elif name == "target-hidden-state-capture":
-            status = CompatibilityStatus.NOT_RUN
-            evidence = (source_artifact,)
-            detail = (
-                "ported capture patch applies to exact SGLang source; "
-                "physical Laguna capture has not passed"
-            )
+            if capture is not None:
+                status = CompatibilityStatus.PASSED
+                evidence = (source_artifact, capture)
+                evidence_level = EvidenceLevel.PHYSICAL_GPU
+                detail = (
+                    "physical Laguna capture wrote five official DFlash layers "
+                    "to Mooncake and cleaned all resources"
+                )
+            else:
+                status = CompatibilityStatus.NOT_RUN
+                evidence = (source_artifact,)
+                detail = (
+                    "ported capture patch applies to exact SGLang source; "
+                    "physical Laguna capture has not passed"
+                )
         steps.append(
             CompatibilityStepResult(
                 name=name,
                 status=status,
-                evidence_level=EvidenceLevel.REAL_PROCESS,
+                evidence_level=evidence_level,
                 evidence=evidence,
                 detail=detail,
             )
@@ -214,7 +228,7 @@ def probe_source_compatibility(
     report_hash = canonical_sha256(report_payload)
     store = _store(database_url, schema)
     store.record_artifact(source_artifact, result.model_dump(mode="json"))
-    for item in (target, dflash):
+    for item in (target, dflash, capture):
         if item is not None:
             store.record_artifact(item, {"kind": "static-serving-probe"})
     store.record_compatibility_report("draft", draft_hash, report_payload, report_hash)
@@ -236,6 +250,23 @@ def _probe_artifact(path: Path) -> ArtifactRef | None:
     if not path.is_file():
         return None
     payload = json.loads(path.read_text(encoding="utf-8"))
+    artifact = payload.get("artifact")
+    return ArtifactRef.model_validate(artifact) if isinstance(artifact, dict) else None
+
+
+def _passing_probe_artifact(path: Path, expected_probe: str) -> ArtifactRef | None:
+    if not path.is_file():
+        return None
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    result = payload.get("result")
+    if (
+        payload.get("probe") != expected_probe
+        or payload.get("status") != "passed"
+        or not isinstance(result, dict)
+        or result.get("status") != "passed"
+        or result.get("cleanup_passed") is not True
+    ):
+        return None
     artifact = payload.get("artifact")
     return ArtifactRef.model_validate(artifact) if isinstance(artifact, dict) else None
 

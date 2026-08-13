@@ -1,6 +1,8 @@
+import json
 from pathlib import Path
 
 from aurorapp.artifacts import ContentAddressedArtifactStore
+from aurorapp.cli import _passing_probe_artifact
 from aurorapp.compatibility import (
     COMPATIBILITY_LADDER,
     CompatibilityReport,
@@ -123,3 +125,27 @@ def test_greedy_probe_parity_compares_exact_token_and_text_surfaces() -> None:
 
     assert result.passed is False
     assert result.mismatches == ("output_ids", "text")
+
+
+def test_capture_artifact_requires_probe_result_and_cleanup_to_pass(tmp_path: Path) -> None:
+    item = ArtifactRef(
+        content_hash="a" * 64,
+        producer="probe",
+        size=1,
+        storage_path="objects/a",
+        validation_result="valid",
+    )
+    path = tmp_path / "capture.json"
+    payload = {
+        "probe": "capture",
+        "status": "passed",
+        "result": {"status": "passed", "cleanup_passed": True},
+        "artifact": item.model_dump(mode="json"),
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert _passing_probe_artifact(path, "capture") == item
+
+    payload["result"]["cleanup_passed"] = False
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    assert _passing_probe_artifact(path, "capture") is None
