@@ -190,7 +190,7 @@ def test_source_report_binds_passing_specforge_ingest_evidence() -> None:
             storage_path=f"objects/{index}",
             validation_result="valid",
         )
-        for index in range(1, 8)
+        for index in range(1, 9)
     ]
 
     steps = _build_source_compatibility_steps(
@@ -198,6 +198,7 @@ def test_source_report_binds_passing_specforge_ingest_evidence() -> None:
         training_model=items[5],
         captured_optimizer=items[5],
         candidate_serving=items[6],
+        parent_restore=items[7],
         training_model_compatible=False,
         training_model_port_ready=True,
     )
@@ -222,3 +223,8 @@ def test_source_report_binds_passing_specforge_ingest_evidence() -> None:
     assert serving.status is CompatibilityStatus.PASSED
     assert serving.evidence_level is EvidenceLevel.PHYSICAL_GPU
     assert serving.evidence == (items[6],)
+    for name in ("parent-restore", "resource-cleanup"):
+        step = steps[COMPATIBILITY_LADDER.index(name)]
+        assert step.status is CompatibilityStatus.PASSED
+        assert step.evidence_level is EvidenceLevel.PHYSICAL_GPU
+        assert step.evidence == (items[7],)

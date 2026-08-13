@@ -202,6 +202,10 @@ def probe_source_compatibility(
         evidence_directory / "candidate-dflash-serving-config-preserved.json",
         "candidate-serving",
     )
+    parent_restore = _passing_probe_artifact(
+        evidence_directory / "parent-dflash-restore.json",
+        "parent-restore",
+    )
     steps = _build_source_compatibility_steps(
         source_artifact,
         target,
@@ -211,6 +215,7 @@ def probe_source_compatibility(
         training_model=training_model_artifact,
         captured_optimizer=captured_optimizer,
         candidate_serving=candidate_serving,
+        parent_restore=parent_restore,
         training_model_compatible=training_model_port.upstream.compatible,
         training_model_port_ready=training_model_port.ready_for_physical_probe,
     )
@@ -231,6 +236,7 @@ def probe_source_compatibility(
         (ingest, "specforge-batch-ingest"),
         (captured_optimizer, "captured-optimizer"),
         (candidate_serving, "candidate-speculative-serving"),
+        (parent_restore, "parent-restore-and-cleanup"),
         (training_model_artifact, "training-model-compatibility"),
     )
     for item, kind in probe_artifacts:
@@ -261,6 +267,7 @@ def _build_source_compatibility_steps(
     training_model: ArtifactRef | None = None,
     captured_optimizer: ArtifactRef | None = None,
     candidate_serving: ArtifactRef | None = None,
+    parent_restore: ArtifactRef | None = None,
     training_model_compatible: bool | None = None,
     training_model_port_ready: bool = False,
 ) -> tuple[CompatibilityStepResult, ...]:
@@ -342,6 +349,15 @@ def _build_source_compatibility_steps(
                 "trained checkpoint loaded in SGLang, performed nonzero DFlash "
                 "proposal and verification work, preserved one greedy target output, "
                 "and cleaned both server arms"
+            )
+        elif name in {"parent-restore", "resource-cleanup"} and parent_restore is not None:
+            status = CompatibilityStatus.PASSED
+            evidence = (parent_restore,)
+            evidence_level = EvidenceLevel.PHYSICAL_GPU
+            detail = (
+                "fresh H100 restored the pinned official DFlash parent, reproduced "
+                "the exact candidate request output with real speculative work, and "
+                "left no process, GPU job, or open port"
             )
         elif name == "bounded-optimizer-step" and training_model is not None:
             evidence = (training_model,)
