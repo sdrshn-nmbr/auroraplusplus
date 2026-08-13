@@ -1,0 +1,53 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "auroraplusplus"
+version = "0.1.0"
+description = "A fail-closed continual speculative-decoding control plane"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "huggingface-hub>=0.34,<1",
+  "modal>=1.1,<2",
+  "numpy>=2.2,<3",
+  "opentelemetry-api>=1.35,<2",
+  "opentelemetry-sdk>=1.35,<2",
+  "orjson>=3.10,<4",
+  "polars>=1.31,<2",
+  "psycopg[binary,pool]>=3.2,<4",
+  "pydantic>=2.11,<3",
+  "typer>=0.16,<1",
+]
+
+[project.scripts]
+aurorapp = "aurorapp.cli:app"
+
+[dependency-groups]
+dev = [
+  "hypothesis>=6.135,<7",
+  "mypy>=1.16,<2",
+  "pytest>=8.4,<9",
+  "pytest-cov>=6.2,<7",
+  "ruff>=0.12,<1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/aurorapp"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-markers"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+packages = ["aurorapp"]
+

@@ -1,0 +1,48 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "check_id": {
+      "title": "Check Id",
+      "type": "string"
+    },
+    "expected_answer": {
+      "anyOf": [
+        {
+          "enum": [
+            "pass",
+            "fail"
+          ],
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Expected Answer"
+    },
+    "question": {
+      "title": "Question",
+      "type": "string"
+    },
+    "required_evidence": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Required Evidence",
+      "type": "array"
+    },
+    "version": {
+      "title": "Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "check_id",
+    "question",
+    "required_evidence",
+    "version"
+  ],
+  "title": "JudgeCheck",
+  "type": "object"
+}

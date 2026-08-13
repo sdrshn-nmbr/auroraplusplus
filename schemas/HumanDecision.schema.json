@@ -1,0 +1,91 @@
+{
+  "$defs": {
+    "HumanApproval": {
+      "additionalProperties": false,
+      "properties": {
+        "algorithm": {
+          "const": "ssh-ed25519",
+          "default": "ssh-ed25519",
+          "title": "Algorithm",
+          "type": "string"
+        },
+        "payload_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Payload Hash",
+          "type": "string"
+        },
+        "public_key": {
+          "title": "Public Key",
+          "type": "string"
+        },
+        "signature": {
+          "title": "Signature",
+          "type": "string"
+        },
+        "signed_at": {
+          "format": "date-time",
+          "title": "Signed At",
+          "type": "string"
+        },
+        "signer": {
+          "title": "Signer",
+          "type": "string"
+        }
+      },
+      "required": [
+        "payload_hash",
+        "signature",
+        "public_key",
+        "signer",
+        "signed_at"
+      ],
+      "title": "HumanApproval",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "answer": {
+      "title": "Answer",
+      "type": "string"
+    },
+    "approval": {
+      "$ref": "#/$defs/HumanApproval"
+    },
+    "decision_id": {
+      "title": "Decision Id",
+      "type": "string"
+    },
+    "evidence_hashes": {
+      "items": {
+        "pattern": "^[0-9a-f]{64}$",
+        "type": "string"
+      },
+      "title": "Evidence Hashes",
+      "type": "array"
+    },
+    "question": {
+      "title": "Question",
+      "type": "string"
+    },
+    "reason": {
+      "title": "Reason",
+      "type": "string"
+    },
+    "reviewer": {
+      "title": "Reviewer",
+      "type": "string"
+    }
+  },
+  "required": [
+    "decision_id",
+    "question",
+    "answer",
+    "reason",
+    "evidence_hashes",
+    "reviewer",
+    "approval"
+  ],
+  "title": "HumanDecision",
+  "type": "object"
+}

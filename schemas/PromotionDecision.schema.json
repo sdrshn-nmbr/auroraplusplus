@@ -1,0 +1,136 @@
+{
+  "$defs": {
+    "ConcurrencyResult": {
+      "additionalProperties": false,
+      "properties": {
+        "cold_load_successes": {
+          "minimum": 0,
+          "title": "Cold Load Successes",
+          "type": "integer"
+        },
+        "concurrency": {
+          "minimum": 1,
+          "title": "Concurrency",
+          "type": "integer"
+        },
+        "correctness_regressions": {
+          "minimum": 0,
+          "title": "Correctness Regressions",
+          "type": "integer"
+        },
+        "health_failures": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Health Failures",
+          "type": "array"
+        },
+        "matched_requests": {
+          "minimum": 0,
+          "title": "Matched Requests",
+          "type": "integer"
+        },
+        "output_rate_lcb_improvement": {
+          "title": "Output Rate Lcb Improvement",
+          "type": "number"
+        },
+        "p95_latency_upper_regression": {
+          "title": "P95 Latency Upper Regression",
+          "type": "number"
+        },
+        "p99_latency_upper_regression": {
+          "title": "P99 Latency Upper Regression",
+          "type": "number"
+        },
+        "parity_mismatches": {
+          "minimum": 0,
+          "title": "Parity Mismatches",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "concurrency",
+        "matched_requests",
+        "output_rate_lcb_improvement",
+        "p95_latency_upper_regression",
+        "p99_latency_upper_regression",
+        "parity_mismatches",
+        "correctness_regressions",
+        "cold_load_successes",
+        "health_failures"
+      ],
+      "title": "ConcurrencyResult",
+      "type": "object"
+    },
+    "PairedEvaluation": {
+      "additionalProperties": false,
+      "properties": {
+        "results": {
+          "items": {
+            "$ref": "#/$defs/ConcurrencyResult"
+          },
+          "title": "Results",
+          "type": "array"
+        }
+      },
+      "required": [
+        "results"
+      ],
+      "title": "PairedEvaluation",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "baseline_id": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Baseline Id",
+      "type": "string"
+    },
+    "challenger_id": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Challenger Id",
+      "type": "string"
+    },
+    "decision_id": {
+      "title": "Decision Id",
+      "type": "string"
+    },
+    "eligible": {
+      "title": "Eligible",
+      "type": "boolean"
+    },
+    "evaluator_bundle_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Evaluator Bundle Hash",
+      "type": "string"
+    },
+    "paired_statistics": {
+      "$ref": "#/$defs/PairedEvaluation"
+    },
+    "reasons": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Reasons",
+      "type": "array"
+    },
+    "rollback_parent": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Rollback Parent",
+      "type": "string"
+    }
+  },
+  "required": [
+    "decision_id",
+    "baseline_id",
+    "challenger_id",
+    "evaluator_bundle_hash",
+    "paired_statistics",
+    "eligible",
+    "reasons",
+    "rollback_parent"
+  ],
+  "title": "PromotionDecision",
+  "type": "object"
+}

@@ -1,0 +1,152 @@
+{
+  "$defs": {
+    "ArtifactRef": {
+      "additionalProperties": false,
+      "properties": {
+        "content_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Content Hash",
+          "type": "string"
+        },
+        "producer": {
+          "title": "Producer",
+          "type": "string"
+        },
+        "size": {
+          "minimum": 0,
+          "title": "Size",
+          "type": "integer"
+        },
+        "storage_path": {
+          "title": "Storage Path",
+          "type": "string"
+        },
+        "validation_result": {
+          "enum": [
+            "pending",
+            "valid",
+            "invalid"
+          ],
+          "title": "Validation Result",
+          "type": "string"
+        }
+      },
+      "required": [
+        "content_hash",
+        "size",
+        "storage_path",
+        "producer",
+        "validation_result"
+      ],
+      "title": "ArtifactRef",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "accepted_spans": {
+      "items": {
+        "type": "integer"
+      },
+      "title": "Accepted Spans",
+      "type": "array"
+    },
+    "active_drafter": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Active Drafter",
+      "type": "string"
+    },
+    "artifact_refs": {
+      "items": {
+        "$ref": "#/$defs/ArtifactRef"
+      },
+      "title": "Artifact Refs",
+      "type": "array"
+    },
+    "experiment_id": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Experiment Id",
+      "type": "string"
+    },
+    "health": {
+      "additionalProperties": true,
+      "title": "Health",
+      "type": "object"
+    },
+    "parent_drafter": {
+      "anyOf": [
+        {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Parent Drafter"
+    },
+    "provenance": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Provenance",
+      "type": "object"
+    },
+    "raw_request": {
+      "additionalProperties": true,
+      "title": "Raw Request",
+      "type": "object"
+    },
+    "rejected_spans": {
+      "items": {
+        "type": "integer"
+      },
+      "title": "Rejected Spans",
+      "type": "array"
+    },
+    "request_id": {
+      "title": "Request Id",
+      "type": "string"
+    },
+    "target_response": {
+      "title": "Target Response",
+      "type": "string"
+    },
+    "target_token_ids": {
+      "items": {
+        "type": "integer"
+      },
+      "title": "Target Token Ids",
+      "type": "array"
+    },
+    "timing_ns": {
+      "additionalProperties": {
+        "type": "integer"
+      },
+      "title": "Timing Ns",
+      "type": "object"
+    },
+    "trace_id": {
+      "title": "Trace Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "trace_id",
+    "request_id",
+    "experiment_id",
+    "raw_request",
+    "target_response",
+    "target_token_ids",
+    "active_drafter",
+    "parent_drafter",
+    "timing_ns",
+    "accepted_spans",
+    "rejected_spans",
+    "health",
+    "provenance",
+    "artifact_refs"
+  ],
+  "title": "TraceRecord",
+  "type": "object"
+}

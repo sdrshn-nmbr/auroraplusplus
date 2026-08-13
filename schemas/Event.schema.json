@@ -1,0 +1,77 @@
+{
+  "$defs": {
+    "EventType": {
+      "enum": [
+        "mode-requested",
+        "recovered-to-shadow",
+        "fence-acquired",
+        "last-good-set",
+        "candidate-promoted",
+        "promotion-rejected",
+        "learning-failed",
+        "drain-started",
+        "drain-completed",
+        "rolled-back"
+      ],
+      "title": "EventType",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "command_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Command Hash",
+      "type": "string"
+    },
+    "experiment_id": {
+      "title": "Experiment Id",
+      "type": "string"
+    },
+    "fencing_number": {
+      "minimum": 0,
+      "title": "Fencing Number",
+      "type": "integer"
+    },
+    "idempotency_key": {
+      "title": "Idempotency Key",
+      "type": "string"
+    },
+    "monotonic_ns": {
+      "minimum": 0,
+      "title": "Monotonic Ns",
+      "type": "integer"
+    },
+    "payload": {
+      "additionalProperties": true,
+      "title": "Payload",
+      "type": "object"
+    },
+    "sequence": {
+      "minimum": 1,
+      "title": "Sequence",
+      "type": "integer"
+    },
+    "type": {
+      "$ref": "#/$defs/EventType"
+    },
+    "wall_time": {
+      "format": "date-time",
+      "title": "Wall Time",
+      "type": "string"
+    }
+  },
+  "required": [
+    "sequence",
+    "experiment_id",
+    "type",
+    "idempotency_key",
+    "command_hash",
+    "fencing_number",
+    "monotonic_ns",
+    "wall_time",
+    "payload"
+  ],
+  "title": "Event",
+  "type": "object"
+}

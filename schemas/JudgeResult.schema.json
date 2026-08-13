@@ -1,0 +1,63 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "answer": {
+      "enum": [
+        "pass",
+        "fail",
+        "unclear"
+      ],
+      "title": "Answer",
+      "type": "string"
+    },
+    "check_id": {
+      "title": "Check Id",
+      "type": "string"
+    },
+    "reason": {
+      "title": "Reason",
+      "type": "string"
+    },
+    "repeated_answers": {
+      "maxItems": 3,
+      "minItems": 3,
+      "prefixItems": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "string"
+        },
+        {
+          "type": "string"
+        }
+      ],
+      "title": "Repeated Answers",
+      "type": "array"
+    },
+    "source_evidence_hashes": {
+      "items": {
+        "pattern": "^[0-9a-f]{64}$",
+        "type": "string"
+      },
+      "title": "Source Evidence Hashes",
+      "type": "array"
+    },
+    "uncertainty": {
+      "maximum": 1,
+      "minimum": 0,
+      "title": "Uncertainty",
+      "type": "number"
+    }
+  },
+  "required": [
+    "check_id",
+    "answer",
+    "reason",
+    "uncertainty",
+    "repeated_answers",
+    "source_evidence_hashes"
+  ],
+  "title": "JudgeResult",
+  "type": "object"
+}

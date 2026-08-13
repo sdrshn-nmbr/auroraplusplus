@@ -1,0 +1,193 @@
+{
+  "$defs": {
+    "ArtifactRef": {
+      "additionalProperties": false,
+      "properties": {
+        "content_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Content Hash",
+          "type": "string"
+        },
+        "producer": {
+          "title": "Producer",
+          "type": "string"
+        },
+        "size": {
+          "minimum": 0,
+          "title": "Size",
+          "type": "integer"
+        },
+        "storage_path": {
+          "title": "Storage Path",
+          "type": "string"
+        },
+        "validation_result": {
+          "enum": [
+            "pending",
+            "valid",
+            "invalid"
+          ],
+          "title": "Validation Result",
+          "type": "string"
+        }
+      },
+      "required": [
+        "content_hash",
+        "size",
+        "storage_path",
+        "producer",
+        "validation_result"
+      ],
+      "title": "ArtifactRef",
+      "type": "object"
+    },
+    "DataPartition": {
+      "enum": [
+        "train",
+        "evaluator-development",
+        "promotion-same-family",
+        "promotion-unseen-family",
+        "public-audit",
+        "quarantine"
+      ],
+      "title": "DataPartition",
+      "type": "string"
+    },
+    "PartitionMembership": {
+      "additionalProperties": false,
+      "properties": {
+        "build_report": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "count": {
+          "minimum": 1,
+          "title": "Count",
+          "type": "integer"
+        },
+        "group_assignment_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Group Assignment Hash",
+          "type": "string"
+        },
+        "name": {
+          "$ref": "#/$defs/DataPartition"
+        },
+        "ordered_row_ids": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Ordered Row Ids",
+          "type": "array"
+        },
+        "ordered_row_ids_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Ordered Row Ids Hash",
+          "type": "string"
+        },
+        "source_revision": {
+          "pattern": "^[0-9a-f]{40}$",
+          "title": "Source Revision",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "ordered_row_ids",
+        "ordered_row_ids_hash",
+        "count",
+        "source_revision",
+        "group_assignment_hash",
+        "build_report"
+      ],
+      "title": "PartitionMembership",
+      "type": "object"
+    },
+    "SealedSourceRef": {
+      "additionalProperties": false,
+      "properties": {
+        "manifest_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Manifest Hash",
+          "type": "string"
+        },
+        "repository": {
+          "title": "Repository",
+          "type": "string"
+        },
+        "revision": {
+          "title": "Revision",
+          "type": "string"
+        }
+      },
+      "required": [
+        "repository",
+        "revision",
+        "manifest_hash"
+      ],
+      "title": "SealedSourceRef",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "approved_row_ids": {
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "title": "Approved Row Ids",
+      "type": "array"
+    },
+    "duplicate_check_version": {
+      "title": "Duplicate Check Version",
+      "type": "string"
+    },
+    "exclusions": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Exclusions",
+      "type": "object"
+    },
+    "license_policy_version": {
+      "title": "License Policy Version",
+      "type": "string"
+    },
+    "partitions": {
+      "items": {
+        "$ref": "#/$defs/PartitionMembership"
+      },
+      "title": "Partitions",
+      "type": "array"
+    },
+    "revision": {
+      "pattern": "^[0-9a-f]{40}$",
+      "title": "Revision",
+      "type": "string"
+    },
+    "sealed_sources": {
+      "items": {
+        "$ref": "#/$defs/SealedSourceRef"
+      },
+      "title": "Sealed Sources",
+      "type": "array"
+    },
+    "source": {
+      "title": "Source",
+      "type": "string"
+    }
+  },
+  "required": [
+    "source",
+    "revision",
+    "approved_row_ids",
+    "exclusions",
+    "partitions",
+    "license_policy_version",
+    "duplicate_check_version",
+    "sealed_sources"
+  ],
+  "title": "DataManifest",
+  "type": "object"
+}

@@ -1,0 +1,47 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "batch_id": {
+      "title": "Batch Id",
+      "type": "string"
+    },
+    "masks_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Masks Hash",
+      "type": "string"
+    },
+    "ordering_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Ordering Hash",
+      "type": "string"
+    },
+    "policy_lag": {
+      "maximum": 1,
+      "minimum": 0,
+      "title": "Policy Lag",
+      "type": "integer"
+    },
+    "trace_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Trace Ids",
+      "type": "array"
+    },
+    "trainer_configuration_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Trainer Configuration Hash",
+      "type": "string"
+    }
+  },
+  "required": [
+    "batch_id",
+    "trace_ids",
+    "policy_lag",
+    "ordering_hash",
+    "masks_hash",
+    "trainer_configuration_hash"
+  ],
+  "title": "TrainingBatch",
+  "type": "object"
+}

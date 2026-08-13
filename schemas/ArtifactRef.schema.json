@@ -1,0 +1,41 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "content_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Content Hash",
+      "type": "string"
+    },
+    "producer": {
+      "title": "Producer",
+      "type": "string"
+    },
+    "size": {
+      "minimum": 0,
+      "title": "Size",
+      "type": "integer"
+    },
+    "storage_path": {
+      "title": "Storage Path",
+      "type": "string"
+    },
+    "validation_result": {
+      "enum": [
+        "pending",
+        "valid",
+        "invalid"
+      ],
+      "title": "Validation Result",
+      "type": "string"
+    }
+  },
+  "required": [
+    "content_hash",
+    "size",
+    "storage_path",
+    "producer",
+    "validation_result"
+  ],
+  "title": "ArtifactRef",
+  "type": "object"
+}

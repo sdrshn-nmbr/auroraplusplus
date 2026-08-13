@@ -1,0 +1,83 @@
+{
+  "schema_version": "1",
+  "name": "laguna-xs-2.1-dflash-int4-h100",
+  "target": {
+    "repository": "poolside/Laguna-XS-2.1-INT4",
+    "revision": "4b7e28abdc0a8b121def816b89d631750bc53c92",
+    "expected_precision": "INT4"
+  },
+  "drafter": {
+    "repository": "poolside/Laguna-XS-2.1-DFlash-INT4",
+    "revision": "630267be6a2ad870ca80fc3930bde87d6ad7bb24",
+    "expected_precision": "INT4"
+  },
+  "training": {
+    "trainer": "specforge",
+    "mode": "online_dflash",
+    "learning_rate": 0.000001,
+    "batch_size": 1,
+    "update_every_traces": 64,
+    "maximum_policy_lag": 1,
+    "loss_selection": "all_positions"
+  },
+  "runtime": {
+    "sglang_revision": "6a5a9eccaab0b98f5c3cfee170c7fbc87dfb98e5",
+    "specforge_revision": "e6440f09a8574b35f894608559fd3d165971e488",
+    "requested_hardware": {
+      "provider": "modal",
+      "gpu": "H100",
+      "count": 2,
+      "memory_gib_minimum": 80,
+      "allow_substitution": false
+    }
+  },
+  "data": {
+    "source": "GPUMODE/KernelBook",
+    "revision": "b76504d85f7f14ef4b1fad81f136f638f2ce625b",
+    "split_ratios": {
+      "train": 0.7,
+      "evaluator-development": 0.1,
+      "promotion-same-family": 0.1,
+      "promotion-unseen-family": 0.1
+    },
+    "license_policy_version": "permissive-v1",
+    "duplicate_check_version": "ast-opgraph-semantic-v1",
+    "sealed_sources": [
+      "ScalingIntelligence/KernelBench",
+      "KernelBenchX",
+      "KernelBench-Hard"
+    ]
+  },
+  "evaluator": {
+    "version": "physical-v1-codex-shadow-v1",
+    "binary_check_versions": [],
+    "judge_prompt_versions": ["codex-error-discovery-v1"],
+    "physical_test_version": "kernel-physical-v1",
+    "workload_weights": {"uniform": 1.0},
+    "promotion_limits": {
+      "matched_requests_per_arm": 256,
+      "output_rate_lcb_minimum": 0.03,
+      "p95_latency_upper_regression_maximum": 0.01,
+      "p99_latency_upper_regression_maximum": 0.02,
+      "cold_loads_required": 3,
+      "bootstrap_resamples": 10000,
+      "bootstrap_seed": 20260812,
+      "required_concurrencies": [1, 4]
+    },
+    "coverage_floors": {},
+    "approval": null
+  },
+  "seeds": {
+    "workload": 20260812,
+    "training": 20260813,
+    "bootstrap": 20260812,
+    "simulation": 20260814
+  },
+  "stop_rules": {
+    "maximum_updates": 100,
+    "stop_on_parity_mismatch": true,
+    "stop_on_missing_observability": true,
+    "stop_on_artifact_failure": true
+  },
+  "initial_mode": "off"
+}

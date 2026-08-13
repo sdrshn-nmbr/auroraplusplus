@@ -1,0 +1,166 @@
+{
+  "$defs": {
+    "HumanApproval": {
+      "additionalProperties": false,
+      "properties": {
+        "algorithm": {
+          "const": "ssh-ed25519",
+          "default": "ssh-ed25519",
+          "title": "Algorithm",
+          "type": "string"
+        },
+        "payload_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Payload Hash",
+          "type": "string"
+        },
+        "public_key": {
+          "title": "Public Key",
+          "type": "string"
+        },
+        "signature": {
+          "title": "Signature",
+          "type": "string"
+        },
+        "signed_at": {
+          "format": "date-time",
+          "title": "Signed At",
+          "type": "string"
+        },
+        "signer": {
+          "title": "Signer",
+          "type": "string"
+        }
+      },
+      "required": [
+        "payload_hash",
+        "signature",
+        "public_key",
+        "signer",
+        "signed_at"
+      ],
+      "title": "HumanApproval",
+      "type": "object"
+    },
+    "PromotionLimits": {
+      "additionalProperties": false,
+      "properties": {
+        "bootstrap_resamples": {
+          "default": 10000,
+          "minimum": 100,
+          "title": "Bootstrap Resamples",
+          "type": "integer"
+        },
+        "bootstrap_seed": {
+          "default": 20260812,
+          "title": "Bootstrap Seed",
+          "type": "integer"
+        },
+        "cold_loads_required": {
+          "default": 3,
+          "minimum": 1,
+          "title": "Cold Loads Required",
+          "type": "integer"
+        },
+        "matched_requests_per_arm": {
+          "default": 256,
+          "minimum": 1,
+          "title": "Matched Requests Per Arm",
+          "type": "integer"
+        },
+        "output_rate_lcb_minimum": {
+          "default": 0.03,
+          "title": "Output Rate Lcb Minimum",
+          "type": "number"
+        },
+        "p95_latency_upper_regression_maximum": {
+          "default": 0.01,
+          "title": "P95 Latency Upper Regression Maximum",
+          "type": "number"
+        },
+        "p99_latency_upper_regression_maximum": {
+          "default": 0.02,
+          "title": "P99 Latency Upper Regression Maximum",
+          "type": "number"
+        },
+        "required_concurrencies": {
+          "default": [
+            1,
+            4
+          ],
+          "items": {
+            "type": "integer"
+          },
+          "title": "Required Concurrencies",
+          "type": "array"
+        }
+      },
+      "title": "PromotionLimits",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "approval": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/HumanApproval"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "binary_check_versions": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Binary Check Versions",
+      "type": "array"
+    },
+    "coverage_floors": {
+      "additionalProperties": {
+        "type": "integer"
+      },
+      "title": "Coverage Floors",
+      "type": "object"
+    },
+    "judge_prompt_versions": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Judge Prompt Versions",
+      "type": "array"
+    },
+    "physical_test_version": {
+      "title": "Physical Test Version",
+      "type": "string"
+    },
+    "promotion_limits": {
+      "$ref": "#/$defs/PromotionLimits"
+    },
+    "version": {
+      "title": "Version",
+      "type": "string"
+    },
+    "workload_weights": {
+      "additionalProperties": {
+        "type": "number"
+      },
+      "title": "Workload Weights",
+      "type": "object"
+    }
+  },
+  "required": [
+    "version",
+    "binary_check_versions",
+    "judge_prompt_versions",
+    "physical_test_version",
+    "workload_weights",
+    "promotion_limits",
+    "coverage_floors"
+  ],
+  "title": "EvaluatorBundle",
+  "type": "object"
+}
