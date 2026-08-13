@@ -53,6 +53,7 @@
     "binary_check_versions": [],
     "judge_prompt_versions": ["codex-error-discovery-v1"],
     "physical_test_version": "kernel-physical-v1",
+    "sampled_distribution_rule_hash": "edab7f04fce2159262f24c50e8f546645479fe5ca821d19ce0f5026e052721d9",
     "workload_weights": {"uniform": 1.0},
     "promotion_limits": {
       "matched_requests_per_arm": 256,

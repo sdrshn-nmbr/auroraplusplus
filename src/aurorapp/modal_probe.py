@@ -33,11 +33,21 @@ from aurorapp.model_port import (
     candidate_serving_from_probe_payload,
 )
 from aurorapp.models import ArtifactRef
+from aurorapp.sampled_distribution import (
+    DistributionArm,
+    DistributionSample,
+    DistributionStratumResult,
+    SampledDistributionSuiteResult,
+    calibrate_distribution_power,
+    evaluate_sampled_distribution,
+)
 from aurorapp.sglang_contract import (
     SAMPLED_GENERATION_SEEDS,
     SGLANG_SERVER_RANDOM_SEED,
     MooncakeReplayEnvelope,
+    distribution_generation_request,
     greedy_generation_request,
+    sampled_distribution_suite_rule,
     sampled_generation_request,
 )
 
@@ -283,6 +293,21 @@ def _sample_generate(port: int, sampling_seed: int) -> dict[str, Any]:
         sampled_generation_request(
             "Write a Python function that adds two tensors.",
             max_new_tokens=32,
+            sampling_seed=sampling_seed,
+        ),
+    )
+
+
+def _distribution_generate(
+    port: int,
+    stratum_index: int,
+    sampling_seed: int,
+) -> dict[str, Any]:
+    rule = sampled_distribution_suite_rule()
+    return _generate_payload(
+        port,
+        distribution_generation_request(
+            rule.strata[stratum_index],
             sampling_seed=sampling_seed,
         ),
     )
@@ -1055,6 +1080,109 @@ def _sampled_serving_arm(
     }
 
 
+def _distribution_serving_arm(
+    *,
+    arm_id: str,
+    port: int,
+    server_random_seed: int,
+    speculative_draft_path: str | None,
+) -> dict[str, Any]:
+    command = [
+        "python",
+        "-m",
+        "sglang.launch_server",
+        "--model-path",
+        TARGET_REPOSITORY,
+        "--revision",
+        TARGET_REVISION,
+        "--trust-remote-code",
+        "--reasoning-parser",
+        "poolside_v1",
+        "--tool-call-parser",
+        "poolside_v1",
+        "--tp",
+        "1",
+        "--attention-backend",
+        "fa3",
+        "--page-size",
+        "1",
+        "--mem-fraction-static",
+        "0.7",
+        "--random-seed",
+        str(server_random_seed),
+        "--enable-deterministic-inference",
+        "--disable-radix-cache",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(port),
+    ]
+    if speculative_draft_path is not None:
+        command.extend(
+            [
+                "--speculative-algorithm",
+                "DFLASH",
+                "--speculative-draft-model-path",
+                speculative_draft_path,
+            ]
+        )
+    process, log_path = _start_logged_process(command)
+    server_start_id = canonical_sha256(
+        {
+            "arm_id": arm_id,
+            "process_group": process.pid,
+            "server_random_seed": server_random_seed,
+            "started_ns": time.time_ns(),
+        }
+    )
+    rule = sampled_distribution_suite_rule()
+    generations: dict[str, list[dict[str, Any]]] = {}
+    server_healthy = False
+    error: dict[str, str] | None = None
+    try:
+        _wait_for_server(port, process, timeout=900)
+        server_healthy = True
+        for stratum_index, stratum in enumerate(rule.strata):
+            values: list[dict[str, Any]] = []
+            for sample_index in range(rule.distribution.samples_per_arm):
+                sampling_seed = (
+                    (server_random_seed * 1_000_003)
+                    + (stratum_index * rule.distribution.samples_per_arm)
+                    + sample_index
+                )
+                values.append(
+                    _distribution_generate(port, stratum_index, sampling_seed)
+                )
+            generations[stratum.stratum_id] = values
+    except Exception as exception:
+        error = {"type": type(exception).__name__, "message": str(exception)}
+    finally:
+        cleanup = _stop_process_group(process, port)
+        server_log = _read_process_log(log_path)
+    cleanup_passed = (
+        not cleanup["remaining_processes"]
+        and not cleanup["gpu_processes"]
+        and cleanup["port_closed"]
+    )
+    requests_passed = bool(generations) and all(
+        generation.get("passed") is True
+        for values in generations.values()
+        for generation in values
+    )
+    return {
+        "passed": server_healthy and requests_passed and cleanup_passed,
+        "arm_id": arm_id,
+        "server_start_id": server_start_id,
+        "server_healthy": server_healthy,
+        "generations": generations,
+        "launch_command": command,
+        "error": error,
+        "cleanup": cleanup,
+        "cleanup_passed": cleanup_passed,
+        "sglang_log": server_log,
+    }
+
+
 def _tokenizer_template_identity() -> dict[str, Any]:
     command = [
         "python",
@@ -1300,6 +1428,150 @@ def _target_sampling_determinism_probe(
         "result": result.model_dump(mode="json"),
         "target_arm": target_arm,
         "cleanup_passed": target_arm["cleanup_passed"],
+    }
+
+
+def _distribution_arm_from_probe(
+    arm: dict[str, Any],
+    stratum_id: str,
+) -> DistributionArm:
+    samples = tuple(
+        DistributionSample(
+            sampling_seed=generation["request"]["sampling_params"]["sampling_seed"],
+            output_ids=tuple(generation["response_body"]["output_ids"]),
+            text=generation["response_body"]["text"],
+            finish_reason=json.dumps(
+                generation["response_body"]["meta_info"]["finish_reason"],
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        )
+        for generation in arm["generations"][stratum_id]
+    )
+    return DistributionArm(
+        arm_id=arm["arm_id"],
+        server_start_id=arm["server_start_id"],
+        samples=samples,
+    )
+
+
+def _sampled_distribution_equivalence_probe(
+    repository_revision: str,
+    checkpoint_path: str,
+    manifest_hash: str,
+    weights_hash: str,
+) -> dict[str, Any]:
+    checkpoint = Path(checkpoint_path)
+    if not checkpoint.is_relative_to("/checkpoints/objects"):
+        raise ValueError("candidate checkpoint must be an immutable checkpoint object")
+    observed_manifest_hash = file_sha256(checkpoint / "manifest.json")
+    observed_weights_hash = file_sha256(checkpoint / "model.safetensors")
+    if observed_manifest_hash != manifest_hash:
+        raise ValueError("candidate manifest hash differs from the requested checkpoint")
+    if observed_weights_hash != weights_hash:
+        raise ValueError("candidate weights hash differs from the requested checkpoint")
+
+    arms = {
+        "target-a": _distribution_serving_arm(
+            arm_id="target-a",
+            port=37000,
+            server_random_seed=2026081301,
+            speculative_draft_path=None,
+        ),
+        "target-b": _distribution_serving_arm(
+            arm_id="target-b",
+            port=37000,
+            server_random_seed=2026081302,
+            speculative_draft_path=None,
+        ),
+        "candidate-a": _distribution_serving_arm(
+            arm_id="candidate-a",
+            port=38000,
+            server_random_seed=2026081303,
+            speculative_draft_path=checkpoint_path,
+        ),
+        "candidate-b": _distribution_serving_arm(
+            arm_id="candidate-b",
+            port=38000,
+            server_random_seed=2026081304,
+            speculative_draft_path=checkpoint_path,
+        ),
+    }
+    failed = {name: arm for name, arm in arms.items() if arm.get("passed") is not True}
+    if failed:
+        return {
+            "status": "failed",
+            "hardware": _hardware_identity(),
+            "runtime": _runtime_identity(repository_revision),
+            "checkpoint": {
+                "path": checkpoint_path,
+                "manifest_hash": observed_manifest_hash,
+                "weights_hash": observed_weights_hash,
+            },
+            "arms": arms,
+            "error": {
+                "type": "DistributionArmFailure",
+                "message": f"sampled distribution arms failed: {sorted(failed)}",
+            },
+        }
+
+    rule = sampled_distribution_suite_rule()
+    power = calibrate_distribution_power(
+        rule.distribution,
+        trials=rule.power_trials,
+        corruption_fraction=rule.corruption_fraction,
+        minimum_power=rule.minimum_power,
+        calibration_seed=rule.calibration_seed,
+    )
+    stratum_results = tuple(
+        DistributionStratumResult(
+            stratum=stratum,
+            result=evaluate_sampled_distribution(
+                rule.distribution,
+                target_a=_distribution_arm_from_probe(arms["target-a"], stratum.stratum_id),
+                target_b=_distribution_arm_from_probe(arms["target-b"], stratum.stratum_id),
+                candidate_a=_distribution_arm_from_probe(
+                    arms["candidate-a"], stratum.stratum_id
+                ),
+                candidate_b=_distribution_arm_from_probe(
+                    arms["candidate-b"], stratum.stratum_id
+                ),
+            ),
+        )
+        for stratum in rule.strata
+    )
+    candidate_generations = {
+        f"{arm_name}:{stratum_id}": generations
+        for arm_name in ("candidate-a", "candidate-b")
+        for stratum_id, generations in arms[arm_name]["generations"].items()
+    }
+    telemetry = _summed_speculative_telemetry(candidate_generations)
+    result = SampledDistributionSuiteResult(
+        rule=rule,
+        power_calibration=power,
+        strata=stratum_results,
+        target_cleanup_passed=(
+            arms["target-a"]["cleanup_passed"] and arms["target-b"]["cleanup_passed"]
+        ),
+        candidate_cleanup_passed=(
+            arms["candidate-a"]["cleanup_passed"]
+            and arms["candidate-b"]["cleanup_passed"]
+        ),
+        candidate_proposed_drafts=telemetry.proposed_drafts,
+        candidate_verify_count=telemetry.verify_count,
+    )
+    return {
+        "status": "passed" if result.passed else "failed",
+        "hardware": _hardware_identity(),
+        "runtime": _runtime_identity(repository_revision),
+        "checkpoint": {
+            "path": checkpoint_path,
+            "manifest_hash": observed_manifest_hash,
+            "weights_hash": observed_weights_hash,
+        },
+        "result": result.model_dump(mode="json"),
+        "arms": arms,
+        "cleanup_passed": all(arm["cleanup_passed"] for arm in arms.values()),
     }
 
 
@@ -1715,6 +1987,32 @@ def sampled_rng_parity_probe(
 @app.function(
     image=sglang_image,
     gpu="H100!",
+    timeout=3600,
+    volumes={
+        "/root/.cache/huggingface": model_cache,
+        "/checkpoints": checkpoint_volume,
+    },
+    single_use_containers=True,
+    restrict_modal_access=True,
+    name="sampled-distribution-equivalence-probe",
+)
+def sampled_distribution_equivalence_probe(
+    repository_revision: str,
+    checkpoint_path: str,
+    manifest_hash: str,
+    weights_hash: str,
+) -> dict[str, Any]:
+    return _sampled_distribution_equivalence_probe(
+        repository_revision,
+        checkpoint_path,
+        manifest_hash,
+        weights_hash,
+    )
+
+
+@app.function(
+    image=sglang_image,
+    gpu="H100!",
     timeout=1800,
     volumes={"/root/.cache/huggingface": model_cache},
     single_use_containers=True,
@@ -1894,6 +2192,19 @@ def main(
                 checkpoint_manifest_hash,
                 checkpoint_weights_hash,
             )
+        elif probe == "sampled-distribution":
+            if not checkpoint_path:
+                raise ValueError("sampled-distribution requires --checkpoint-path")
+            if not checkpoint_manifest_hash or not checkpoint_weights_hash:
+                raise ValueError(
+                    "sampled-distribution requires checkpoint manifest and weights hashes"
+                )
+            result = sampled_distribution_equivalence_probe.remote(
+                revision,
+                checkpoint_path,
+                checkpoint_manifest_hash,
+                checkpoint_weights_hash,
+            )
         elif probe == "target-sampling-determinism":
             if moe_runner_backend not in {"auto", "triton"}:
                 raise ValueError("moe-runner-backend must be auto or triton")
@@ -1924,7 +2235,8 @@ def main(
             raise ValueError(
                 "probe must be identity, target, dflash, capture, ingest, "
                 "model-port, captured-optimizer, reload-diagnostic, candidate-serving, "
-                "tokenizer-identity, sampled-rng, target-sampling-determinism, "
+                "tokenizer-identity, sampled-rng, sampled-distribution, "
+                "target-sampling-determinism, "
                 "or parent-restore"
             )
         remote_status = result.get("status") if isinstance(result, dict) else None

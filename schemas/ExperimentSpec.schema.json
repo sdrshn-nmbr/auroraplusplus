@@ -158,6 +158,11 @@
         "promotion_limits": {
           "$ref": "#/$defs/PromotionLimits"
         },
+        "sampled_distribution_rule_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sampled Distribution Rule Hash",
+          "type": "string"
+        },
         "version": {
           "title": "Version",
           "type": "string"
@@ -175,6 +180,7 @@
         "binary_check_versions",
         "judge_prompt_versions",
         "physical_test_version",
+        "sampled_distribution_rule_hash",
         "workload_weights",
         "promotion_limits",
         "coverage_floors"

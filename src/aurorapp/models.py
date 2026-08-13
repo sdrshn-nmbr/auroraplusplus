@@ -203,6 +203,7 @@ class EvaluatorBundle(StrictModel):
     binary_check_versions: list[str]
     judge_prompt_versions: list[str]
     physical_test_version: str
+    sampled_distribution_rule_hash: Sha256
     workload_weights: dict[str, float]
     promotion_limits: PromotionLimits
     coverage_floors: dict[str, int]

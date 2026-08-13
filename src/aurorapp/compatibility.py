@@ -15,7 +15,7 @@ COMPATIBILITY_LADDER = (
     "target-only-serving",
     "official-dflash-load",
     "greedy-lossless-parity",
-    "sampled-rng-contract",
+    "sampled-distribution-equivalence",
     "target-hidden-state-capture",
     "specforge-batch-ingest",
     "bounded-optimizer-step",

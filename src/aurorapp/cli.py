@@ -32,6 +32,7 @@ from aurorapp.models import (
     SystemMode,
 )
 from aurorapp.schema import write_schemas
+from aurorapp.sglang_contract import sampled_distribution_suite_rule
 from aurorapp.signatures import ApprovalSigner
 from aurorapp.source_probe import run_capture_patch_probe
 from aurorapp.training_probe import run_training_model_port_probe
@@ -89,6 +90,19 @@ def config_schemas(
 ) -> None:
     paths = write_schemas(output)
     _json({"count": len(paths), "paths": [str(path) for path in paths]})
+
+
+@config_app.command("sampled-distribution-rule")
+def config_sampled_distribution_rule(
+    output: Annotated[Path | None, typer.Option(dir_okay=False)] = None,
+) -> None:
+    rule = sampled_distribution_suite_rule()
+    payload = rule.model_dump(mode="json")
+    rule_hash = canonical_sha256(payload)
+    if output is not None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(rule.model_dump_json(indent=2) + "\n", encoding="utf-8")
+    _json({"rule_hash": rule_hash, "payload": payload, "output": output})
 
 
 @data_app.command("build")
@@ -210,9 +224,9 @@ def probe_source_compatibility(
         evidence_directory / "tokenizer-template-identity.json",
         "tokenizer-identity",
     )
-    sampled_rng = _passing_probe_artifact(
-        evidence_directory / "sampled-rng-parity.json",
-        "sampled-rng",
+    sampled_distribution = _passing_probe_artifact(
+        evidence_directory / "sampled-distribution-equivalence.json",
+        "sampled-distribution",
     )
     steps = _build_source_compatibility_steps(
         source_artifact,
@@ -225,7 +239,7 @@ def probe_source_compatibility(
         candidate_serving=candidate_serving,
         parent_restore=parent_restore,
         tokenizer_identity=tokenizer_identity,
-        sampled_rng=sampled_rng,
+        sampled_distribution=sampled_distribution,
         training_model_compatible=training_model_port.upstream.compatible,
         training_model_port_ready=training_model_port.ready_for_physical_probe,
     )
@@ -248,7 +262,7 @@ def probe_source_compatibility(
         (candidate_serving, "candidate-speculative-serving"),
         (parent_restore, "parent-restore-and-cleanup"),
         (tokenizer_identity, "tokenizer-template-identity"),
-        (sampled_rng, "sampled-rng-contract"),
+        (sampled_distribution, "sampled-distribution-equivalence"),
         (training_model_artifact, "training-model-compatibility"),
     )
     for item, kind in probe_artifacts:
@@ -281,7 +295,7 @@ def _build_source_compatibility_steps(
     candidate_serving: ArtifactRef | None = None,
     parent_restore: ArtifactRef | None = None,
     tokenizer_identity: ArtifactRef | None = None,
-    sampled_rng: ArtifactRef | None = None,
+    sampled_distribution: ArtifactRef | None = None,
     training_model_compatible: bool | None = None,
     training_model_port_ready: bool = False,
 ) -> tuple[CompatibilityStepResult, ...]:
@@ -307,13 +321,16 @@ def _build_source_compatibility_steps(
             status = CompatibilityStatus.PASSED
             evidence = (target, dflash)
             detail = "one request, fixed server seed, exact token and text parity"
-        elif name == "sampled-rng-contract" and sampled_rng is not None:
+        elif (
+            name == "sampled-distribution-equivalence"
+            and sampled_distribution is not None
+        ):
             status = CompatibilityStatus.PASSED
-            evidence = (sampled_rng,)
+            evidence = (sampled_distribution,)
             evidence_level = EvidenceLevel.PHYSICAL_GPU
             detail = (
-                "three request seeds repeated twice per arm with deterministic inference, "
-                "exact target/candidate output parity, varied outputs, and real DFlash work"
+                "power-calibrated sampled target/candidate equivalence stayed inside "
+                "the signed target-self margin across fresh server starts"
             )
         elif name == "target-hidden-state-capture":
             if capture is not None:
