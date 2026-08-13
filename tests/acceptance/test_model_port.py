@@ -5,9 +5,11 @@ import pytest
 from aurorapp.model_port import (
     CapturedBatchOptimizerResult,
     CheckpointReloadResult,
+    DraftProbeInputHashes,
     LagunaDFlashConfigContract,
     PhysicalModelPortResult,
     checkpoint_contract,
+    probe_wire_json,
     validate_checkpoint_header,
 )
 
@@ -136,6 +138,12 @@ def test_captured_batch_optimizer_requires_reload_and_complete_checkpoint() -> N
             "state_digest": "f" * 64,
             "reference_state_digest": "f" * 64,
             "state_equal": True,
+            "input_hashes": {
+                "noise_embedding": "1" * 64,
+                "target_hidden": "2" * 64,
+                "position_ids": "3" * 64,
+            },
+            "inputs_equal": True,
             "output_equal": True,
             "output_allclose": True,
             "output_mismatch_count": 0,
@@ -177,6 +185,12 @@ def test_captured_batch_optimizer_requires_checkpoint_path_at_construction() -> 
                     "state_digest": "f" * 64,
                     "reference_state_digest": "f" * 64,
                     "state_equal": True,
+                    "input_hashes": {
+                        "noise_embedding": "1" * 64,
+                        "target_hidden": "2" * 64,
+                        "position_ids": "3" * 64,
+                    },
+                    "inputs_equal": True,
                     "output_equal": True,
                     "output_allclose": True,
                     "output_mismatch_count": 0,
@@ -196,6 +210,12 @@ def test_reload_diagnostic_does_not_replace_exact_parity_with_allclose() -> None
         state_digest="a" * 64,
         reference_state_digest="a" * 64,
         state_equal=True,
+        input_hashes=DraftProbeInputHashes(
+            noise_embedding="1" * 64,
+            target_hidden="2" * 64,
+            position_ids="3" * 64,
+        ),
+        inputs_equal=True,
         output_equal=False,
         output_allclose=True,
         output_mismatch_count=1,
@@ -213,6 +233,12 @@ def test_reload_diagnostic_wire_record_excludes_computed_passed_field() -> None:
         state_digest="a" * 64,
         reference_state_digest="a" * 64,
         state_equal=True,
+        input_hashes=DraftProbeInputHashes(
+            noise_embedding="1" * 64,
+            target_hidden="2" * 64,
+            position_ids="3" * 64,
+        ),
+        inputs_equal=True,
         output_equal=True,
         output_allclose=True,
         output_mismatch_count=0,
@@ -220,7 +246,65 @@ def test_reload_diagnostic_wire_record_excludes_computed_passed_field() -> None:
         output_mean_abs_difference=0,
     )
 
-    encoded = result.model_dump_json(exclude={"passed"})
+    encoded = probe_wire_json(result)
 
     assert '"passed"' not in encoded
     assert CheckpointReloadResult.model_validate_json(encoded).passed is True
+
+
+def test_probe_wire_record_excludes_nested_computed_fields() -> None:
+    result = CapturedBatchOptimizerResult.model_validate(
+        {
+            "sample_id": "sample",
+            "input_ids_shape": [1, 4],
+            "loss_mask_shape": [1, 4],
+            "hidden_states_shape": [1, 4, 10240],
+            "loss": 1.0,
+            "accuracy": 0.0,
+            "accuracy_denom": 1,
+            "gradient_parameters": [
+                "draft_model.layers.0.self_attn.qkv_proj.weight",
+                "draft_model.layers.0.self_attn.g_proj.weight",
+                "draft_model.fc.weight",
+                "draft_model.aux_hidden_norms.0.weight",
+            ],
+            "optimizer_state_entries": 58,
+            "changed_parameter": "draft_model.layers.0.self_attn.g_proj.weight",
+            "parameter_delta": 1.0,
+            "checkpoint_hashes": {
+                "config": "1" * 64,
+                "weights": "2" * 64,
+                "optimizer": "3" * 64,
+                "random_state": "4" * 64,
+                "manifest": "5" * 64,
+            },
+            "checkpoint_path": "/checkpoints/candidate",
+            "pre_save_state_digest": "6" * 64,
+            "training_cursor": 1,
+            "reload": {
+                "missing": [],
+                "unexpected": [],
+                "state_digest": "6" * 64,
+                "reference_state_digest": "6" * 64,
+                "state_equal": True,
+                "input_hashes": {
+                    "noise_embedding": "7" * 64,
+                    "target_hidden": "8" * 64,
+                    "position_ids": "9" * 64,
+                },
+                "inputs_equal": True,
+                "output_equal": True,
+                "output_allclose": True,
+                "output_mismatch_count": 0,
+                "output_max_abs_difference": 0,
+                "output_mean_abs_difference": 0,
+            },
+            "released": True,
+            "release_pending": 0,
+        }
+    )
+
+    encoded = probe_wire_json(result)
+
+    assert '"passed"' not in encoded
+    assert CapturedBatchOptimizerResult.model_validate_json(encoded).passed is True

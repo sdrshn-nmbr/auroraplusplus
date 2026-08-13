@@ -161,6 +161,8 @@ class CheckpointReloadResult(StrictModel):
     state_digest: Sha256
     reference_state_digest: Sha256
     state_equal: bool
+    input_hashes: "DraftProbeInputHashes"
+    inputs_equal: bool
     output_equal: bool
     output_allclose: bool
     output_mismatch_count: int = Field(ge=0)
@@ -175,6 +177,7 @@ class CheckpointReloadResult(StrictModel):
             and not self.unexpected
             and self.state_equal
             and self.state_digest == self.reference_state_digest
+            and self.inputs_equal
             and self.output_equal
             and self.output_allclose
             and self.output_mismatch_count == 0
@@ -185,7 +188,18 @@ class CheckpointReloadResult(StrictModel):
 
 class CheckpointReferenceResult(StrictModel):
     state_digest: Sha256
+    input_hashes: "DraftProbeInputHashes"
     reference_path: str = Field(min_length=1)
+
+
+class DraftProbeInputHashes(StrictModel):
+    noise_embedding: Sha256
+    target_hidden: Sha256
+    position_ids: Sha256
+
+
+def probe_wire_json(result: StrictModel) -> str:
+    return result.model_dump_json(exclude_computed_fields=True)
 
 
 def checkpoint_contract(

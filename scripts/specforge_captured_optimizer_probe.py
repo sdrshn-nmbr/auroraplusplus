@@ -30,6 +30,8 @@ from aurorapp.model_port import (
     CapturedBatchOptimizerResult,
     CheckpointReferenceResult,
     CheckpointReloadResult,
+    DraftProbeInputHashes,
+    probe_wire_json,
 )
 
 INPUT_IDS = [1, 2, 3, 4]
@@ -66,18 +68,48 @@ def file_hash(path: Path) -> str:
     return digest.hexdigest()
 
 
-def deterministic_draft_output(model: torch.nn.Module) -> torch.Tensor:
-    torch.manual_seed(20260813)
-    torch.cuda.manual_seed_all(20260813)
-    noise = torch.randn(1, 4, 2048, device="cuda", dtype=torch.bfloat16)
-    target_hidden = torch.randn(1, 2, 10240, device="cuda", dtype=torch.bfloat16)
-    position_ids = torch.arange(6, device="cuda").unsqueeze(0)
+def tensor_hash(tensor: torch.Tensor) -> str:
+    value = tensor.detach().cpu().contiguous()
+    digest = hashlib.sha256()
+    digest.update(str(value.dtype).encode())
+    digest.update(b"\0")
+    digest.update(str(tuple(value.shape)).encode())
+    digest.update(b"\0")
+    digest.update(value.view(torch.uint8).numpy().tobytes())
+    return digest.hexdigest()
+
+
+def draft_probe_inputs() -> dict[str, torch.Tensor]:
+    generator = torch.Generator(device="cpu").manual_seed(20260813)
+    return {
+        "noise_embedding": torch.randn(1, 4, 2048, generator=generator, dtype=torch.bfloat16),
+        "target_hidden": torch.randn(1, 2, 10240, generator=generator, dtype=torch.bfloat16),
+        "position_ids": torch.arange(6).unsqueeze(0),
+    }
+
+
+def draft_input_hashes(inputs: dict[str, torch.Tensor]) -> DraftProbeInputHashes:
+    return DraftProbeInputHashes(
+        noise_embedding=tensor_hash(inputs["noise_embedding"]),
+        target_hidden=tensor_hash(inputs["target_hidden"]),
+        position_ids=tensor_hash(inputs["position_ids"]),
+    )
+
+
+def deterministic_draft_output(
+    model: torch.nn.Module,
+    inputs: dict[str, torch.Tensor],
+) -> torch.Tensor:
     with torch.no_grad():
-        return model(
-            position_ids=position_ids,
-            noise_embedding=noise,
-            target_hidden=target_hidden,
-        ).detach().cpu()
+        return (
+            model(
+                position_ids=inputs["position_ids"].to("cuda"),
+                noise_embedding=inputs["noise_embedding"].to("cuda"),
+                target_hidden=inputs["target_hidden"].to("cuda"),
+            )
+            .detach()
+            .cpu()
+        )
 
 
 def state_digest(model: torch.nn.Module) -> str:
@@ -110,10 +142,21 @@ def write_reference(checkpoint: Path, reference_path: Path) -> None:
     if loading.get("missing_keys") or loading.get("unexpected_keys"):
         raise RuntimeError(f"reference checkpoint load is incomplete: {loading}")
     digest = state_digest(model)
-    output = deterministic_draft_output(model)
-    torch.save({"output": output, "state_digest": digest}, reference_path)
+    inputs = draft_probe_inputs()
+    input_hashes = draft_input_hashes(inputs)
+    output = deterministic_draft_output(model, inputs)
+    torch.save(
+        {
+            "inputs": inputs,
+            "input_hashes": input_hashes.model_dump(mode="json"),
+            "output": output,
+            "state_digest": digest,
+        },
+        reference_path,
+    )
     result = CheckpointReferenceResult(
         state_digest=digest,
+        input_hashes=input_hashes,
         reference_path=str(reference_path),
     )
     del model, output
@@ -127,8 +170,11 @@ def reload_checkpoint(checkpoint: Path, reference_path: Path) -> None:
     reference = torch.load(reference_path, map_location="cpu", weights_only=True)
     expected = reference["output"]
     expected_state_digest = reference["state_digest"]
+    inputs = reference["inputs"]
+    expected_input_hashes = DraftProbeInputHashes.model_validate(reference["input_hashes"])
+    observed_input_hashes = draft_input_hashes(inputs)
     observed_state_digest = state_digest(model)
-    observed = deterministic_draft_output(model)
+    observed = deterministic_draft_output(model, inputs)
     difference = (expected.float() - observed.float()).abs()
     result = CheckpointReloadResult(
         missing=tuple(loading.get("missing_keys") or ()),
@@ -136,6 +182,8 @@ def reload_checkpoint(checkpoint: Path, reference_path: Path) -> None:
         state_digest=observed_state_digest,
         reference_state_digest=expected_state_digest,
         state_equal=observed_state_digest == expected_state_digest,
+        input_hashes=observed_input_hashes,
+        inputs_equal=observed_input_hashes == expected_input_hashes,
         output_equal=bool(torch.equal(expected, observed)),
         output_allclose=bool(torch.allclose(expected, observed, rtol=1e-5, atol=1e-6)),
         output_mismatch_count=int(torch.count_nonzero(expected != observed).item()),
@@ -146,7 +194,7 @@ def reload_checkpoint(checkpoint: Path, reference_path: Path) -> None:
     gc.collect()
     torch.cuda.empty_cache()
     print(
-        "AURORAPP_RELOAD_RESULT=" + result.model_dump_json(exclude={"passed"}),
+        "AURORAPP_RELOAD_RESULT=" + probe_wire_json(result),
         flush=True,
     )
 
@@ -338,11 +386,18 @@ def train(args: argparse.Namespace) -> None:
         optimizer.step()
         delta = float((before - parameters[CHANGED_PARAMETER].detach()).abs().sum().item())
         training_model.draft_model.eval()
-        reference = deterministic_draft_output(training_model.draft_model)
+        inputs = draft_probe_inputs()
+        input_hashes = draft_input_hashes(inputs)
+        reference = deterministic_draft_output(training_model.draft_model, inputs)
         reference_state_digest = state_digest(training_model.draft_model)
         reference_path = Path("/tmp") / f"aurorapp-reload-{uuid.uuid4()}.pt"
         torch.save(
-            {"output": reference, "state_digest": reference_state_digest},
+            {
+                "inputs": inputs,
+                "input_hashes": input_hashes.model_dump(mode="json"),
+                "output": reference,
+                "state_digest": reference_state_digest,
+            },
             reference_path,
         )
         checkpoint, checkpoint_hashes = write_checkpoint(
@@ -376,9 +431,7 @@ def train(args: argparse.Namespace) -> None:
         reference_path.unlink(missing_ok=True)
         if reload_process.returncode != 0:
             raise RuntimeError(
-                "fresh checkpoint reload failed: "
-                + reload_process.stdout
-                + reload_process.stderr
+                "fresh checkpoint reload failed: " + reload_process.stdout + reload_process.stderr
             )
         reload_result = parse_reload_result(reload_process.stdout)
         store.release(handle, reason="captured-optimizer-consumed")
@@ -406,8 +459,7 @@ def train(args: argparse.Namespace) -> None:
             release_pending=int(release_drain.get("release_pending", -1)),
         )
         print(
-            "AURORAPP_RESULT="
-            + result.model_dump_json(exclude={"passed"}),
+            "AURORAPP_RESULT=" + probe_wire_json(result),
             flush=True,
         )
     finally:
