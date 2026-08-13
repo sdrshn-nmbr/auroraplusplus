@@ -8,7 +8,9 @@ import sys
 import pytest
 
 from aurorapp.modal_probe import (
+    _read_process_log,
     _specforge_ingest_after_prewarm,
+    _start_logged_process,
     _stop_process_group,
     validate_dflash_capture_result,
     validate_specforge_ingest_result,
@@ -100,6 +102,16 @@ def test_specforge_reader_connects_only_after_capture_sink_is_warm(monkeypatch) 
     assert result["passed"] is True
     assert result["prewarm"] == {"passed": True}
     assert events == ["capture-store-connected", "specforge-store-connected"]
+
+
+def test_long_running_service_logs_cannot_fill_a_parent_pipe() -> None:
+    process, log_path = _start_logged_process([sys.executable, "-c", "print('x' * 1_000_000)"])
+
+    process.wait(timeout=5)
+    output = _read_process_log(log_path)
+
+    assert process.returncode == 0
+    assert len(output) == 1_000_001
 
 
 def test_cleanup_kills_children_after_process_group_leader_exits(monkeypatch) -> None:

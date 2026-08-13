@@ -5,6 +5,7 @@ import platform
 import signal
 import socket
 import subprocess
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -159,8 +160,9 @@ def _wait_for_server(port: int, process: subprocess.Popen[str], timeout: int) ->
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if process.poll() is not None:
-            stdout, _ = process.communicate()
-            raise RuntimeError(f"SGLang exited before health check:\n{stdout[-12000:]}")
+            raise RuntimeError(
+                f"SGLang exited before health check with status {process.returncode}"
+            )
         try:
             with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=2) as response:
                 if response.status == 200:
@@ -501,6 +503,33 @@ def _process_group_members(process_group: int) -> list[str]:
     ).stdout.splitlines()
 
 
+def _start_logged_process(command: list[str]) -> tuple[subprocess.Popen[str], Path]:
+    file_descriptor, raw_path = tempfile.mkstemp(prefix="aurorapp-service-", suffix=".log")
+    log_path = Path(raw_path)
+    log_stream = os.fdopen(file_descriptor, "w", encoding="utf-8")
+    try:
+        process = subprocess.Popen(
+            command,
+            stdout=log_stream,
+            stderr=subprocess.STDOUT,
+            text=True,
+            start_new_session=True,
+        )
+    except BaseException:
+        log_stream.close()
+        log_path.unlink(missing_ok=True)
+        raise
+    log_stream.close()
+    return process, log_path
+
+
+def _read_process_log(log_path: Path) -> str:
+    try:
+        return log_path.read_text(encoding="utf-8", errors="replace")
+    finally:
+        log_path.unlink(missing_ok=True)
+
+
 def _server_probe(speculative: bool, repository_revision: str) -> dict[str, Any]:
     port = 31000 if speculative else 30000
     command = [
@@ -542,13 +571,7 @@ def _server_probe(speculative: bool, repository_revision: str) -> dict[str, Any]
                 DRAFT_REVISION,
             ]
         )
-    process = subprocess.Popen(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        start_new_session=True,
-    )
+    process, log_path = _start_logged_process(command)
     generation: dict[str, Any] = {"passed": False, "error": "generation did not run"}
     server_healthy = False
     error: dict[str, str] | None = None
@@ -560,7 +583,7 @@ def _server_probe(speculative: bool, repository_revision: str) -> dict[str, Any]
         error = {"type": type(exception).__name__, "message": str(exception)}
     finally:
         cleanup = _stop_process_group(process, port)
-        stdout, _ = process.communicate()
+        stdout = _read_process_log(log_path)
     cleanup_passed = (
         not cleanup["remaining_processes"]
         and not cleanup["gpu_processes"]
@@ -599,12 +622,8 @@ def _capture_server_probe(
             "MOONCAKE_PROTOCOL": "tcp",
         }
     )
-    master = subprocess.Popen(
-        ["mooncake_master", "--enable-http-metadata-server=true"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        start_new_session=True,
+    master, master_log_path = _start_logged_process(
+        ["mooncake_master", "--enable-http-metadata-server=true"]
     )
     command = [
         "python",
@@ -637,13 +656,7 @@ def _capture_server_probe(
         "--port",
         str(port),
     ]
-    process = subprocess.Popen(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        start_new_session=True,
-    )
+    process, server_log_path = _start_logged_process(command)
     workload: dict[str, Any] = {"passed": False, "error": "capture did not run"}
     server_healthy = False
     error: dict[str, str] | None = None
@@ -657,9 +670,9 @@ def _capture_server_probe(
         error = {"type": type(exception).__name__, "message": str(exception)}
     finally:
         server_cleanup = _stop_process_group(process, port)
-        server_log, _ = process.communicate()
+        server_log = _read_process_log(server_log_path)
         master_cleanup = _stop_process_group(master, 50051)
-        master_log, _ = master.communicate()
+        master_log = _read_process_log(master_log_path)
     cleanup_passed = (
         not server_cleanup["remaining_processes"]
         and not master_cleanup["remaining_processes"]
