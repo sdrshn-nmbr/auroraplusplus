@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from aurorapp.model_port import (
+    CandidateSpeculativeServingResult,
     CapturedBatchOptimizerResult,
     CheckpointReloadResult,
     DraftExecutionState,
@@ -30,6 +31,57 @@ def execution_state() -> DraftExecutionState:
         cublas_allow_tf32=False,
         cudnn_allow_tf32=True,
     )
+
+
+def candidate_serving_result() -> CandidateSpeculativeServingResult:
+    return CandidateSpeculativeServingResult.model_validate(
+        {
+            "target_repository": "poolside/Laguna-XS-2.1-INT4",
+            "target_revision": "1" * 40,
+            "parent_draft_repository": "poolside/Laguna-XS-2.1-DFlash-INT4",
+            "parent_draft_revision": "2" * 40,
+            "candidate_checkpoint_path": "/checkpoints/objects/candidate",
+            "candidate_manifest_hash": "3" * 64,
+            "candidate_weights_hash": "4" * 64,
+            "request_hash": "5" * 64,
+            "target_output_ids": [1, 2, 3],
+            "candidate_output_ids": [1, 2, 3],
+            "target_text": "answer",
+            "candidate_text": "answer",
+            "target_finish_reason": {"type": "length", "length": 3},
+            "candidate_finish_reason": {"type": "length", "length": 3},
+            "speculative_telemetry": {
+                "proposed_drafts": 32,
+                "accepted_drafts": 4,
+                "verify_count": 3,
+                "accept_histogram": [1, 1, 1],
+            },
+            "target_server_healthy": True,
+            "candidate_server_healthy": True,
+            "draft_checkpoint_loaded": True,
+            "target_cleanup_passed": True,
+            "candidate_cleanup_passed": True,
+        }
+    )
+
+
+def test_candidate_serving_requires_lossless_output_and_real_dflash_work() -> None:
+    result = candidate_serving_result()
+
+    assert result.passed is True
+    assert result.speculative_telemetry.passed is True
+
+    mismatch = result.model_copy(update={"candidate_output_ids": (1, 9, 3)})
+    assert mismatch.passed is False
+
+    no_draft_work = result.model_copy(
+        update={
+            "speculative_telemetry": result.speculative_telemetry.model_copy(
+                update={"proposed_drafts": 0}
+            )
+        }
+    )
+    assert no_draft_work.passed is False
 
 
 def test_training_wrapper_does_not_cast_nonpersistent_model_buffers() -> None:

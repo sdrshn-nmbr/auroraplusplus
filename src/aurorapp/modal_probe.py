@@ -15,8 +15,9 @@ from typing import Any
 import modal
 
 from aurorapp.artifacts import ContentAddressedArtifactStore
-from aurorapp.canonical import canonical_bytes
+from aurorapp.canonical import canonical_bytes, canonical_sha256, file_sha256
 from aurorapp.model_port import (
+    CandidateSpeculativeServingResult,
     CapturedBatchOptimizerResult,
     CheckpointReferenceResult,
     CheckpointReloadResult,
@@ -835,6 +836,191 @@ def _server_probe(speculative: bool, repository_revision: str) -> dict[str, Any]
     }
 
 
+def _candidate_serving_arm(
+    *,
+    port: int,
+    speculative_draft_path: str | None,
+) -> dict[str, Any]:
+    command = [
+        "python",
+        "-m",
+        "sglang.launch_server",
+        "--model-path",
+        TARGET_REPOSITORY,
+        "--revision",
+        TARGET_REVISION,
+        "--trust-remote-code",
+        "--reasoning-parser",
+        "poolside_v1",
+        "--tool-call-parser",
+        "poolside_v1",
+        "--tp",
+        "1",
+        "--attention-backend",
+        "fa3",
+        "--page-size",
+        "1",
+        "--mem-fraction-static",
+        "0.7",
+        "--random-seed",
+        str(SGLANG_SERVER_RANDOM_SEED),
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(port),
+    ]
+    if speculative_draft_path is not None:
+        command.extend(
+            [
+                "--speculative-algorithm",
+                "DFLASH",
+                "--speculative-draft-model-path",
+                speculative_draft_path,
+            ]
+        )
+    process, log_path = _start_logged_process(command)
+    generation: dict[str, Any] = {"passed": False, "error": "generation did not run"}
+    server_healthy = False
+    error: dict[str, str] | None = None
+    try:
+        _wait_for_server(port, process, timeout=900)
+        server_healthy = True
+        generation = _generate(port)
+    except Exception as exception:
+        error = {"type": type(exception).__name__, "message": str(exception)}
+    finally:
+        cleanup = _stop_process_group(process, port)
+        server_log = _read_process_log(log_path)
+    cleanup_passed = (
+        not cleanup["remaining_processes"]
+        and not cleanup["gpu_processes"]
+        and cleanup["port_closed"]
+    )
+    return {
+        "passed": server_healthy and generation.get("passed") is True and cleanup_passed,
+        "server_healthy": server_healthy,
+        "generation": generation,
+        "launch_command": command,
+        "error": error,
+        "cleanup": cleanup,
+        "cleanup_passed": cleanup_passed,
+        "sglang_log": server_log,
+    }
+
+
+def _candidate_serving_result(
+    *,
+    target_arm: dict[str, Any],
+    candidate_arm: dict[str, Any],
+    checkpoint_path: str,
+    manifest_hash: str,
+    weights_hash: str,
+) -> CandidateSpeculativeServingResult:
+    target_generation = target_arm["generation"]
+    candidate_generation = candidate_arm["generation"]
+    target_request = target_generation["request"]
+    candidate_request = candidate_generation["request"]
+    if target_request != candidate_request:
+        raise ValueError("target-only and candidate requests differ")
+    target_response = target_generation["response_body"]
+    candidate_response = candidate_generation["response_body"]
+    target_meta = target_response["meta_info"]
+    candidate_meta = candidate_response["meta_info"]
+    telemetry = {
+        "proposed_drafts": candidate_meta.get(
+            "spec_proposed_drafts", candidate_meta.get("spec_num_proposed_drafts", 0)
+        ),
+        "accepted_drafts": candidate_meta.get(
+            "spec_accepted_drafts", candidate_meta.get("spec_num_correct_drafts", 0)
+        ),
+        "verify_count": candidate_meta.get("spec_verify_ct", 0),
+        "accept_histogram": candidate_meta.get("spec_accept_histogram", []),
+    }
+    return CandidateSpeculativeServingResult.model_validate(
+        {
+            "target_repository": TARGET_REPOSITORY,
+            "target_revision": TARGET_REVISION,
+            "parent_draft_repository": DRAFT_REPOSITORY,
+            "parent_draft_revision": DRAFT_REVISION,
+            "candidate_checkpoint_path": checkpoint_path,
+            "candidate_manifest_hash": manifest_hash,
+            "candidate_weights_hash": weights_hash,
+            "request_hash": canonical_sha256(target_request),
+            "target_output_ids": target_response["output_ids"],
+            "candidate_output_ids": candidate_response["output_ids"],
+            "target_text": target_response["text"],
+            "candidate_text": candidate_response["text"],
+            "target_finish_reason": target_meta["finish_reason"],
+            "candidate_finish_reason": candidate_meta["finish_reason"],
+            "speculative_telemetry": telemetry,
+            "target_server_healthy": target_arm["server_healthy"],
+            "candidate_server_healthy": candidate_arm["server_healthy"],
+            "draft_checkpoint_loaded": candidate_arm["server_healthy"]
+            and telemetry["proposed_drafts"] > 0,
+            "target_cleanup_passed": target_arm["cleanup_passed"],
+            "candidate_cleanup_passed": candidate_arm["cleanup_passed"],
+        }
+    )
+
+
+def _candidate_speculative_serving_probe(
+    repository_revision: str,
+    checkpoint_path: str,
+    manifest_hash: str,
+    weights_hash: str,
+) -> dict[str, Any]:
+    checkpoint = Path(checkpoint_path)
+    if not checkpoint.is_relative_to("/checkpoints/objects"):
+        raise ValueError("candidate checkpoint must be an immutable checkpoint object")
+    observed_manifest_hash = file_sha256(checkpoint / "manifest.json")
+    observed_weights_hash = file_sha256(checkpoint / "model.safetensors")
+    if observed_manifest_hash != manifest_hash:
+        raise ValueError("candidate manifest hash differs from the requested checkpoint")
+    if observed_weights_hash != weights_hash:
+        raise ValueError("candidate weights hash differs from the requested checkpoint")
+
+    target_arm = _candidate_serving_arm(port=35000, speculative_draft_path=None)
+    candidate_arm = _candidate_serving_arm(
+        port=36000,
+        speculative_draft_path=checkpoint_path,
+    )
+    try:
+        result = _candidate_serving_result(
+            target_arm=target_arm,
+            candidate_arm=candidate_arm,
+            checkpoint_path=checkpoint_path,
+            manifest_hash=manifest_hash,
+            weights_hash=weights_hash,
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        return {
+            "status": "failed",
+            "hardware": _hardware_identity(),
+            "runtime": _runtime_identity(repository_revision),
+            "checkpoint": {
+                "path": checkpoint_path,
+                "manifest_hash": observed_manifest_hash,
+                "weights_hash": observed_weights_hash,
+            },
+            "target_arm": target_arm,
+            "candidate_arm": candidate_arm,
+            "error": {"type": type(error).__name__, "message": str(error)},
+        }
+    return {
+        "status": "passed" if result.passed else "failed",
+        "hardware": _hardware_identity(),
+        "runtime": _runtime_identity(repository_revision),
+        "checkpoint": {
+            "path": checkpoint_path,
+            "manifest_hash": observed_manifest_hash,
+            "weights_hash": observed_weights_hash,
+        },
+        "result": result.model_dump(mode="json"),
+        "target_arm": target_arm,
+        "candidate_arm": candidate_arm,
+    }
+
+
 def _capture_server_probe(
     repository_revision: str,
     *,
@@ -974,6 +1160,32 @@ def official_dflash_probe(repository_revision: str) -> dict[str, Any]:
 @app.function(
     image=sglang_image,
     gpu="H100!",
+    timeout=2400,
+    volumes={
+        "/root/.cache/huggingface": model_cache,
+        "/checkpoints": checkpoint_volume,
+    },
+    single_use_containers=True,
+    restrict_modal_access=True,
+    name="candidate-dflash-serving-probe",
+)
+def candidate_dflash_serving_probe(
+    repository_revision: str,
+    checkpoint_path: str,
+    manifest_hash: str,
+    weights_hash: str,
+) -> dict[str, Any]:
+    return _candidate_speculative_serving_probe(
+        repository_revision,
+        checkpoint_path,
+        manifest_hash,
+        weights_hash,
+    )
+
+
+@app.function(
+    image=sglang_image,
+    gpu="H100!",
     timeout=1800,
     volumes={"/root/.cache/huggingface": model_cache},
     single_use_containers=True,
@@ -1070,6 +1282,8 @@ def main(
     output: str = "",
     allow_dirty: bool = False,
     checkpoint_path: str = "",
+    checkpoint_manifest_hash: str = "",
+    checkpoint_weights_hash: str = "",
 ) -> None:
     revision = _local_repository_revision(allow_dirty)
     try:
@@ -1094,10 +1308,23 @@ def main(
                 revision,
                 checkpoint_path,
             )
+        elif probe == "candidate-serving":
+            if not checkpoint_path:
+                raise ValueError("candidate-serving requires --checkpoint-path")
+            if not checkpoint_manifest_hash or not checkpoint_weights_hash:
+                raise ValueError(
+                    "candidate-serving requires checkpoint manifest and weights hashes"
+                )
+            result = candidate_dflash_serving_probe.remote(
+                revision,
+                checkpoint_path,
+                checkpoint_manifest_hash,
+                checkpoint_weights_hash,
+            )
         else:
             raise ValueError(
                 "probe must be identity, target, dflash, capture, ingest, "
-                "model-port, captured-optimizer, or reload-diagnostic"
+                "model-port, captured-optimizer, reload-diagnostic, or candidate-serving"
             )
         remote_status = result.get("status") if isinstance(result, dict) else None
         record: dict[str, Any] = {
@@ -1114,6 +1341,7 @@ def main(
                         "model-port",
                         "captured-optimizer",
                         "reload-diagnostic",
+                        "candidate-serving",
                     }
                     else sglang_image.object_id
                 )

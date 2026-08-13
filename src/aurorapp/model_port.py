@@ -7,7 +7,70 @@ from typing import Literal
 
 from pydantic import ConfigDict, Field, computed_field, model_validator
 
-from aurorapp.models import Sha256, StrictModel
+from aurorapp.models import GitRevision, Sha256, StrictModel
+
+
+class GenerationFinishReason(StrictModel):
+    type: str = Field(min_length=1)
+    length: int | None = Field(default=None, ge=0)
+
+
+class SpeculativeTelemetry(StrictModel):
+    proposed_drafts: int = Field(ge=0)
+    accepted_drafts: int = Field(ge=0)
+    verify_count: int = Field(ge=0)
+    accept_histogram: tuple[int, ...]
+
+    @model_validator(mode="after")
+    def counts_are_consistent(self) -> "SpeculativeTelemetry":
+        if self.accepted_drafts > self.proposed_drafts:
+            raise ValueError("accepted drafts cannot exceed proposed drafts")
+        if any(count < 0 for count in self.accept_histogram):
+            raise ValueError("accept histogram counts cannot be negative")
+        return self
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def passed(self) -> bool:
+        return self.proposed_drafts > 0 and self.verify_count > 0
+
+
+class CandidateSpeculativeServingResult(StrictModel):
+    target_repository: str = Field(min_length=1)
+    target_revision: GitRevision
+    parent_draft_repository: str = Field(min_length=1)
+    parent_draft_revision: GitRevision
+    candidate_checkpoint_path: str = Field(min_length=1)
+    candidate_manifest_hash: Sha256
+    candidate_weights_hash: Sha256
+    request_hash: Sha256
+    target_output_ids: tuple[int, ...] = Field(min_length=1)
+    candidate_output_ids: tuple[int, ...] = Field(min_length=1)
+    target_text: str
+    candidate_text: str
+    target_finish_reason: GenerationFinishReason
+    candidate_finish_reason: GenerationFinishReason
+    speculative_telemetry: SpeculativeTelemetry
+    target_server_healthy: bool
+    candidate_server_healthy: bool
+    draft_checkpoint_loaded: bool
+    target_cleanup_passed: bool
+    candidate_cleanup_passed: bool
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def passed(self) -> bool:
+        return (
+            self.target_server_healthy
+            and self.candidate_server_healthy
+            and self.draft_checkpoint_loaded
+            and self.target_cleanup_passed
+            and self.candidate_cleanup_passed
+            and self.target_output_ids == self.candidate_output_ids
+            and self.target_text == self.candidate_text
+            and self.target_finish_reason == self.candidate_finish_reason
+            and self.speculative_telemetry.passed
+        )
 
 
 class LagunaDFlashMethodContract(StrictModel):
