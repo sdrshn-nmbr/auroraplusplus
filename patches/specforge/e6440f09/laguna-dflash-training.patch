@@ -1,0 +1,383 @@
+diff --git a/specforge/algorithms/dflash/providers.py b/specforge/algorithms/dflash/providers.py
+index 2cc119ac9ce1114707525db0619d038653cb21f2..32e6c4b3fc37495d2859867cbb952f57e7562feb 100644
+--- a/specforge/algorithms/dflash/providers.py
++++ b/specforge/algorithms/dflash/providers.py
+@@ -38,6 +38,11 @@ from specforge.data.loss_mask import has_consecutive_supervised_tokens
+ 
+ ALGORITHM_NAME = "dflash"
+ DRAFT_ARCHITECTURE = "DFlashDraftModel"
++LAGUNA_DRAFT_ARCHITECTURE = "DFlashLagunaForCausalLM"
++COMPATIBLE_DRAFT_ARCHITECTURES = {
++    DRAFT_ARCHITECTURE,
++    LAGUNA_DRAFT_ARCHITECTURE,
++}
+ 
+ 
+ def build_step(wrapped_model, *, target_head=None, **_options):
+@@ -136,7 +141,7 @@ def algorithm_spec() -> AlgorithmSpec:
+     return AlgorithmSpec(
+         name=ALGORITHM_NAME,
+         draft=DraftRequirement(
+-            compatible_architectures={DRAFT_ARCHITECTURE},
++            compatible_architectures=COMPATIBLE_DRAFT_ARCHITECTURES,
+             default_architecture=DRAFT_ARCHITECTURE,
+             supported_overrides={"num_hidden_layers", "block_size"},
+         ),
+@@ -178,6 +183,7 @@ def algorithm_providers() -> AlgorithmProviders:
+             draft_config=DraftConfigProvider(
+                 architecture=DRAFT_ARCHITECTURE,
+                 expected_auto_map_model="dflash.DFlashDraftModel",
++                compatible_architectures=frozenset(COMPATIBLE_DRAFT_ARCHITECTURES),
+                 target_defaults=TargetDerivedDraftDefaults(
+                     model_type="qwen3",
+                     num_hidden_layers=1,
+diff --git a/specforge/modeling/draft/__init__.py b/specforge/modeling/draft/__init__.py
+index 839869dd66a191bea9f6fc8025e4630f3885d258..45e31861c10c4656e35315fead535ea1898c87d9 100644
+--- a/specforge/modeling/draft/__init__.py
++++ b/specforge/modeling/draft/__init__.py
+@@ -8,6 +8,7 @@ from .dflash import (
+ from .domino import DominoDraftModel
+ from .dspark import DSparkDraftModel
+ from .llama3_eagle import LlamaForCausalLMEagle3
++from .laguna_dflash import DFlashLagunaForCausalLM
+ from .peagle import PEagleDraftModel
+ from .registry import DRAFT_REGISTRY, available_drafts, register_draft, resolve_draft
+ 
+@@ -17,6 +18,7 @@ __all__ = [
+     "DominoDraftModel",
+     "DSparkDraftModel",
+     "LlamaForCausalLMEagle3",
++    "DFlashLagunaForCausalLM",
+     "PEagleDraftModel",
+     "build_target_layer_ids",
+     "extract_context_feature",
+diff --git a/specforge/modeling/draft/dflash.py b/specforge/modeling/draft/dflash.py
+index 4acd30e112726af83df5eca0fbf34126c27eca93..168b80b1c0c8c221b9862c848535fe7e4763ad40 100644
+--- a/specforge/modeling/draft/dflash.py
++++ b/specforge/modeling/draft/dflash.py
+@@ -359,6 +359,7 @@ def normalize_draft_head_checkpoint_keys(
+ class DFlashDraftModel(Qwen3PreTrainedModel):
+     config_class = Qwen3Config
+     _no_split_modules = ["Qwen3DFlashDecoderLayer"]
++    decoder_layer_cls = Qwen3DFlashDecoderLayer
+ 
+     def __init__(
+         self,
+@@ -371,7 +372,7 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
+         kernels = dflash_kernels or DEFAULT_DFLASH_KERNELS
+         self.layers = nn.ModuleList(
+             [
+-                Qwen3DFlashDecoderLayer(config, layer_idx, kernels)
++                self.decoder_layer_cls(config, layer_idx, kernels)
+                 for layer_idx in range(config.num_hidden_layers)
+             ]
+         )
+@@ -381,7 +382,7 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
+             build_target_layer_ids(config.num_target_layers, config.num_hidden_layers),
+         )
+         self.norm = kernels.make_rms_norm(config.hidden_size, config.rms_norm_eps)
+-        self.rotary_emb = Qwen3RotaryEmbedding(config)
++        self.rotary_emb = self.build_rotary_embedding(config)
+         self.fc = nn.Linear(
+             len(self.target_layer_ids) * config.hidden_size,
+             config.hidden_size,
+@@ -399,6 +400,9 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
+         self.register_load_state_dict_pre_hook(normalize_draft_head_checkpoint_keys)
+         self.post_init()
+ 
++    def build_rotary_embedding(self, config):
++        return Qwen3RotaryEmbedding(config)
++
+     def _init_draft_head(self, config, dflash_config: dict) -> None:
+         del config, dflash_config
+ 
+@@ -462,7 +466,7 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
+         **kwargs,
+     ) -> CausalLMOutputWithPast:
+         hidden_states = noise_embedding
+-        target_hidden = self.hidden_norm(self.fc(target_hidden))
++        target_hidden = self.project_target_hidden(target_hidden)
+         position_embeddings = self.rotary_emb(hidden_states, position_ids)
+         for layer_type, layer in zip(self.layer_types, self.layers):
+             layer_attention_mask = (
+@@ -482,6 +486,9 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
+             )
+         return self.norm(hidden_states)
+ 
++    def project_target_hidden(self, target_hidden: torch.Tensor) -> torch.Tensor:
++        return self.hidden_norm(self.fc(target_hidden))
++
+     @torch.inference_mode()
+     def spec_generate(
+         self,
+diff --git a/specforge/modeling/draft/laguna_dflash.py b/specforge/modeling/draft/laguna_dflash.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..6b7db14cad79a4fe7fd7afc7959f06e4fbf9de04
+--- /dev/null
++++ b/specforge/modeling/draft/laguna_dflash.py
+@@ -0,0 +1,265 @@
++import copy
++from collections.abc import Callable
++from typing import ClassVar, Literal, Unpack
++
++import torch
++import torch.nn.functional as F
++from pydantic import BaseModel, ConfigDict, Field, model_validator
++from torch import nn
++from transformers.cache_utils import Cache
++from transformers.integrations.flex_attention import compile_friendly_flex_attention
++from transformers.models.laguna.configuration_laguna import LagunaConfig
++from transformers.models.qwen3.modeling_qwen3 import (
++    ALL_ATTENTION_FUNCTIONS,
++    FlashAttentionKwargs,
++    Qwen3RotaryEmbedding,
++    eager_attention_forward,
++)
++
++from .dflash import (
++    DFlashDraftModel,
++    Qwen3DFlashAttention,
++    Qwen3DFlashDecoderLayer,
++    _prepare_dflash_eager_mask,
++    apply_rotary_pos_emb,
++)
++from .dflash_kernels import DEFAULT_DFLASH_KERNELS, DFlashKernels
++from .flex_attention_backend import flex_attention_backend
++from .registry import register_draft
++
++
++class LagunaDFlashMethodContract(BaseModel):
++    model_config = ConfigDict(extra="forbid", frozen=True)
++
++    block_size: int = Field(ge=2)
++    mask_token_id: int = Field(ge=0)
++    num_target_layers: int = Field(gt=0)
++    target_layer_ids: tuple[int, ...]
++    causal: bool
++
++
++class LagunaDFlashModelContract(BaseModel):
++    model_config = ConfigDict(extra="forbid", frozen=True)
++
++    hidden_size: int = Field(gt=0)
++    num_hidden_layers: int = Field(gt=0)
++    num_attention_heads: int = Field(gt=0)
++    num_key_value_heads: int = Field(gt=0)
++    head_dim: int = Field(gt=0)
++    gating: Literal["per-head", "per-element", "disabled"]
++    layer_types: tuple[Literal["full_attention", "sliding_attention"], ...]
++    dflash_config: LagunaDFlashMethodContract
++
++    @model_validator(mode="after")
++    def dimensions_are_consistent(self) -> "LagunaDFlashModelContract":
++        if len(self.layer_types) != self.num_hidden_layers:
++            raise ValueError("layer_types must contain one value per draft layer")
++        if len(self.dflash_config.target_layer_ids) != self.num_hidden_layers:
++            raise ValueError("target_layer_ids must contain one value per draft layer")
++        if self.num_attention_heads % self.num_key_value_heads != 0:
++            raise ValueError("attention heads must be divisible by key-value heads")
++        return self
++
++
++class LagunaDFlashAttention(Qwen3DFlashAttention):
++    def __init__(
++        self,
++        config: LagunaConfig,
++        layer_idx: int,
++        kernels: DFlashKernels,
++    ) -> None:
++        super().__init__(config, layer_idx, kernels)
++        del self.q_proj, self.k_proj, self.v_proj
++        q_width = config.num_attention_heads * self.head_dim
++        kv_width = config.num_key_value_heads * self.head_dim
++        self.q_width = q_width
++        self.kv_width = kv_width
++        self.qkv_proj = nn.Linear(
++            config.hidden_size,
++            q_width + 2 * kv_width,
++            bias=config.attention_bias,
++        )
++        if config.gating == "disabled":
++            self.g_proj = None
++        else:
++            gate_width = config.num_attention_heads if config.gating == "per-head" else q_width
++            self.g_proj = nn.Linear(config.hidden_size, gate_width, bias=False)
++        self.gate_per_head = config.gating == "per-head"
++
++    def forward(
++        self,
++        hidden_states: torch.Tensor,
++        target_hidden: torch.Tensor,
++        position_embeddings: tuple[torch.Tensor, torch.Tensor],
++        attention_mask: torch.Tensor | None,
++        past_key_values: Cache | None = None,
++        cache_position: torch.LongTensor | None = None,
++        **kwargs: Unpack[FlashAttentionKwargs],
++    ) -> tuple[torch.Tensor, torch.Tensor | None]:
++        batch_size, query_length = hidden_states.shape[:-1]
++        context_length = target_hidden.shape[1]
++        query, key_noise, value_noise = self.qkv_proj(hidden_states).split(
++            [self.q_width, self.kv_width, self.kv_width], dim=-1
++        )
++        _, key_context, value_context = self.qkv_proj(target_hidden).split(
++            [self.q_width, self.kv_width, self.kv_width], dim=-1
++        )
++        query = query.view(batch_size, query_length, -1, self.head_dim)
++        query = self.q_norm(query).transpose(1, 2)
++        key = torch.cat([key_context, key_noise], dim=1).view(
++            batch_size, context_length + query_length, -1, self.head_dim
++        )
++        value = torch.cat([value_context, value_noise], dim=1).view(
++            batch_size, context_length + query_length, -1, self.head_dim
++        )
++        key = self.k_norm(key).transpose(1, 2)
++        value = value.transpose(1, 2)
++        cosine, sine = position_embeddings
++        query, key = apply_rotary_pos_emb(query, key, cosine, sine)
++        if past_key_values is not None:
++            cache_kwargs = {
++                "sin": sine,
++                "cos": cosine,
++                "cache_position": cache_position,
++            }
++            key, value = past_key_values.update(key, value, self.layer_idx, cache_kwargs)
++
++        valid_queries = None
++        if self.config._attn_implementation == "flex_attention":
++            kernel_options = dict(kwargs.pop("kernel_options", None) or {})
++            backend = flex_attention_backend()
++            if backend is not None:
++                kernel_options["BACKEND"] = backend
++            attention_output = compile_friendly_flex_attention(
++                query,
++                key,
++                value,
++                block_mask=attention_mask,
++                enable_gqa=True,
++                scale=self.scaling,
++                kernel_options=kernel_options or None,
++            ).transpose(1, 2)
++            attention_weights = None
++        else:
++            attention_function: Callable = eager_attention_forward
++            if self.config._attn_implementation == "eager":
++                attention_mask, valid_queries = _prepare_dflash_eager_mask(
++                    attention_mask, query.dtype
++                )
++            else:
++                attention_function = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
++            attention_output, attention_weights = attention_function(
++                self,
++                query,
++                key,
++                value,
++                attention_mask,
++                dropout=0.0 if not self.training else self.attention_dropout,
++                scaling=self.scaling,
++                sliding_window=self.sliding_window,
++                **kwargs,
++            )
++            if valid_queries is not None and attention_weights is not None:
++                attention_weights = attention_weights.masked_fill(~valid_queries, 0)
++        attention_output = attention_output.reshape(batch_size, query_length, -1)
++        if self.g_proj is not None:
++            gate = F.softplus(self.g_proj(hidden_states).float()).to(attention_output.dtype)
++            if self.gate_per_head:
++                output_shape = attention_output.shape
++                attention_output = (
++                    attention_output.view(
++                        *output_shape[:-1],
++                        self.config.num_attention_heads,
++                        self.head_dim,
++                    )
++                    * gate.unsqueeze(-1)
++                ).view(output_shape)
++            else:
++                attention_output = attention_output * gate
++        attention_output = self.o_proj(attention_output)
++        if valid_queries is not None:
++            attention_output = attention_output.masked_fill(~valid_queries.any(dim=1), 0)
++        return attention_output, attention_weights
++
++
++class LagunaDFlashDecoderLayer(Qwen3DFlashDecoderLayer):
++    def __init__(
++        self,
++        config: LagunaConfig,
++        layer_idx: int,
++        kernels: DFlashKernels,
++    ) -> None:
++        super().__init__(config, layer_idx, kernels)
++        self.self_attn = LagunaDFlashAttention(config, layer_idx, kernels)
++
++
++@register_draft
++class DFlashLagunaForCausalLM(DFlashDraftModel):
++    config_class = LagunaConfig
++    _no_split_modules: ClassVar[list[str]] = ["LagunaDFlashDecoderLayer"]
++    decoder_layer_cls = LagunaDFlashDecoderLayer
++
++    def __init__(
++        self,
++        config: LagunaConfig,
++        dflash_kernels: DFlashKernels | None = None,
++    ) -> None:
++        contract = LagunaDFlashModelContract.model_validate(
++            {
++                "hidden_size": config.hidden_size,
++                "num_hidden_layers": config.num_hidden_layers,
++                "num_attention_heads": config.num_attention_heads,
++                "num_key_value_heads": config.num_key_value_heads,
++                "head_dim": config.head_dim,
++                "gating": config.gating,
++                "layer_types": config.layer_types,
++                "dflash_config": config.dflash_config,
++            }
++        )
++        config.block_size = contract.dflash_config.block_size
++        config.num_target_layers = contract.dflash_config.num_target_layers
++        super().__init__(config, dflash_kernels=dflash_kernels)
++        self.aux_hidden_norms = nn.ModuleList(
++            [
++                (dflash_kernels or DEFAULT_DFLASH_KERNELS).make_rms_norm(
++                    config.hidden_size, config.rms_norm_eps
++                )
++                for _ in contract.dflash_config.target_layer_ids
++            ]
++        )
++
++    def build_rotary_embedding(self, config: LagunaConfig) -> Qwen3RotaryEmbedding:
++        layer_flavors = set(config.layer_types)
++        if len(layer_flavors) != 1:
++            raise ValueError("Laguna DFlash requires one uniform attention layer flavor")
++        layer_flavor = next(iter(layer_flavors))
++        rope_parameters = config.rope_parameters.get(layer_flavor)
++        if not isinstance(rope_parameters, dict):
++            raise ValueError(f"Laguna config has no RoPE parameters for {layer_flavor}")
++        rotary_config = copy.deepcopy(config)
++        rotary_config.rope_parameters = dict(rope_parameters)
++        return Qwen3RotaryEmbedding(rotary_config)
++
++    def project_target_hidden(self, target_hidden: torch.Tensor) -> torch.Tensor:
++        expected_width = len(self.aux_hidden_norms) * self.config.hidden_size
++        if target_hidden.shape[-1] != expected_width:
++            raise ValueError(
++                f"Laguna DFlash target hidden width must be {expected_width}, "
++                f"got {target_hidden.shape[-1]}"
++            )
++        slices = target_hidden.view(
++            *target_hidden.shape[:-1], len(self.aux_hidden_norms), self.config.hidden_size
++        )
++        normalized = torch.stack(
++            [norm(slices[..., index, :]) for index, norm in enumerate(self.aux_hidden_norms)],
++            dim=-2,
++        )
++        return self.hidden_norm(self.fc(normalized.flatten(-2)))
++
++
++__all__ = [
++    "DFlashLagunaForCausalLM",
++    "LagunaDFlashAttention",
++    "LagunaDFlashMethodContract",
++    "LagunaDFlashModelContract",
++]
