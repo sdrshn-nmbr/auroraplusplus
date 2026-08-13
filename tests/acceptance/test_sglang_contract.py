@@ -4,11 +4,13 @@ import signal
 import socket
 import subprocess
 import sys
+import time
 
 import pytest
 
 from aurorapp.modal_probe import (
     _read_process_log,
+    _run_until_terminal_record,
     _specforge_ingest_after_prewarm,
     _start_logged_process,
     _stop_process_group,
@@ -112,6 +114,24 @@ def test_long_running_service_logs_cannot_fill_a_parent_pipe() -> None:
 
     assert process.returncode == 0
     assert len(output) == 1_000_001
+
+
+def test_terminal_record_ends_a_child_with_hanging_native_shutdown() -> None:
+    started = time.monotonic()
+    result = _run_until_terminal_record(
+        [
+            sys.executable,
+            "-c",
+            "import time; print('DONE={}', flush=True); time.sleep(60)",
+        ],
+        marker="DONE=",
+        timeout=5,
+    )
+
+    assert time.monotonic() - started < 5
+    assert result["terminal_records"] == ["{}"]
+    assert result["terminated_after_terminal_record"] is True
+    assert result["returncode"] == -signal.SIGTERM
 
 
 def test_cleanup_kills_children_after_process_group_leader_exits(monkeypatch) -> None:

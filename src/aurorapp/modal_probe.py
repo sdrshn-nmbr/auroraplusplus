@@ -359,46 +359,31 @@ def _specforge_ingest(port: int) -> dict[str, Any]:
         "--base-url",
         f"http://127.0.0.1:{port}",
     ]
-    try:
-        completed = subprocess.run(
-            command,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
-    except subprocess.TimeoutExpired as error:
-        stdout = (
-            error.stdout.decode(errors="replace")
-            if isinstance(error.stdout, bytes)
-            else error.stdout
-        )
-        stderr = (
-            error.stderr.decode(errors="replace")
-            if isinstance(error.stderr, bytes)
-            else error.stderr
-        )
+    execution = _run_until_terminal_record(
+        command,
+        marker="AURORAPP_RESULT=",
+        timeout=300,
+    )
+    if execution["timed_out"]:
         return {
             "passed": False,
             "command": command,
-            "returncode": None,
-            "stdout": stdout or "",
-            "stderr": stderr or "",
+            "returncode": execution["returncode"],
+            "stdout": execution["output"],
+            "stderr": "",
             "error": "SpecForge ingest subprocess timed out after 300 seconds",
         }
-    marker = "AURORAPP_RESULT="
-    result_lines = [
-        line.removeprefix(marker)
-        for line in completed.stdout.splitlines()
-        if line.startswith(marker)
-    ]
-    if completed.returncode != 0 or len(result_lines) != 1:
+    result_lines = execution["terminal_records"]
+    accepted_exit = (
+        execution["returncode"] == 0 or execution["terminated_after_terminal_record"] is True
+    )
+    if not accepted_exit or len(result_lines) != 1:
         return {
             "passed": False,
             "command": command,
-            "returncode": completed.returncode,
-            "stdout": completed.stdout,
-            "stderr": completed.stderr,
+            "returncode": execution["returncode"],
+            "stdout": execution["output"],
+            "stderr": "",
             "error": "SpecForge ingest subprocess did not return one result",
         }
     try:
@@ -412,17 +397,18 @@ def _specforge_ingest(port: int) -> dict[str, Any]:
         return {
             "passed": False,
             "command": command,
-            "returncode": completed.returncode,
-            "stdout": completed.stdout,
-            "stderr": completed.stderr,
+            "returncode": execution["returncode"],
+            "stdout": execution["output"],
+            "stderr": "",
             "error": str(error),
         }
     return {
         "passed": True,
         "command": command,
-        "returncode": completed.returncode,
-        "stdout": completed.stdout,
-        "stderr": completed.stderr,
+        "returncode": execution["returncode"],
+        "stdout": execution["output"],
+        "stderr": "",
+        "terminated_after_terminal_record": execution["terminated_after_terminal_record"],
         "result": result,
         "token_count": token_count,
         "feature_width": feature_width,
@@ -528,6 +514,56 @@ def _read_process_log(log_path: Path) -> str:
         return log_path.read_text(encoding="utf-8", errors="replace")
     finally:
         log_path.unlink(missing_ok=True)
+
+
+def _run_until_terminal_record(
+    command: list[str],
+    *,
+    marker: str,
+    timeout: int,
+) -> dict[str, Any]:
+    process, log_path = _start_logged_process(command)
+    deadline = time.monotonic() + timeout
+    terminal_records: list[str] = []
+    timed_out = False
+    while time.monotonic() < deadline:
+        output = log_path.read_text(encoding="utf-8", errors="replace")
+        terminal_records = [
+            line.removeprefix(marker).rstrip("\r\n")
+            for line in output.splitlines(keepends=True)
+            if line.startswith(marker) and line.endswith(("\n", "\r"))
+        ]
+        if terminal_records or process.poll() is not None:
+            break
+        time.sleep(0.05)
+    else:
+        timed_out = True
+
+    terminated_after_terminal_record = bool(terminal_records and process.poll() is None)
+    if process.poll() is None:
+        process_group = os.getpgid(process.pid)
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(process_group, signal.SIGTERM)
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process_group, signal.SIGKILL)
+            process.wait(timeout=10)
+
+    output = _read_process_log(log_path)
+    terminal_records = [
+        line.removeprefix(marker).rstrip("\r\n")
+        for line in output.splitlines(keepends=True)
+        if line.startswith(marker) and line.endswith(("\n", "\r"))
+    ]
+    return {
+        "output": output,
+        "returncode": process.returncode,
+        "terminal_records": terminal_records,
+        "terminated_after_terminal_record": terminated_after_terminal_record,
+        "timed_out": timed_out,
+    }
 
 
 def _server_probe(speculative: bool, repository_revision: str) -> dict[str, Any]:
