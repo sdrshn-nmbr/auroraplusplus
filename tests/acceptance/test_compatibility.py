@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 
 from aurorapp.artifacts import ContentAddressedArtifactStore
-from aurorapp.cli import _passing_probe_artifact
+from aurorapp.cli import _build_source_compatibility_steps, _passing_probe_artifact
 from aurorapp.compatibility import (
     COMPATIBILITY_LADDER,
     CompatibilityReport,
@@ -149,3 +149,26 @@ def test_capture_artifact_requires_probe_result_and_cleanup_to_pass(tmp_path: Pa
     payload["result"]["cleanup_passed"] = False
     path.write_text(json.dumps(payload), encoding="utf-8")
     assert _passing_probe_artifact(path, "capture") is None
+
+
+def test_source_report_binds_passing_specforge_ingest_evidence() -> None:
+    items = [
+        ArtifactRef(
+            content_hash=str(index) * 64,
+            producer="probe",
+            size=1,
+            storage_path=f"objects/{index}",
+            validation_result="valid",
+        )
+        for index in range(1, 6)
+    ]
+
+    steps = _build_source_compatibility_steps(*items)
+    ingest = steps[COMPATIBILITY_LADDER.index("specforge-batch-ingest")]
+
+    assert ingest.status is CompatibilityStatus.PASSED
+    assert ingest.evidence_level is EvidenceLevel.PHYSICAL_GPU
+    assert ingest.evidence == (items[-1],)
+    assert steps[COMPATIBILITY_LADDER.index("bounded-optimizer-step")].status is (
+        CompatibilityStatus.NOT_RUN
+    )

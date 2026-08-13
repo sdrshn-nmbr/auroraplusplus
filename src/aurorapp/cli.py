@@ -179,6 +179,58 @@ def probe_source_compatibility(
         evidence_directory / "laguna-dflash-capture.json",
         "capture",
     )
+    ingest = _passing_probe_artifact(
+        evidence_directory / "specforge-batch-ingest.json",
+        "ingest",
+    )
+    steps = _build_source_compatibility_steps(
+        source_artifact,
+        target,
+        dflash,
+        capture,
+        ingest,
+    )
+    report = CompatibilityReport(
+        identity_kind="draft",
+        experiment_identity=draft_hash,
+        steps=steps,
+        cleanup_verified=False,
+    )
+    report_payload = report.model_dump(mode="json")
+    report_hash = canonical_sha256(report_payload)
+    store = _store(database_url, schema)
+    store.record_artifact(source_artifact, result.model_dump(mode="json"))
+    probe_artifacts = (
+        (target, "target-serving"),
+        (dflash, "dflash-serving"),
+        (capture, "target-hidden-state-capture"),
+        (ingest, "specforge-batch-ingest"),
+    )
+    for item, kind in probe_artifacts:
+        if item is not None:
+            store.record_artifact(item, {"kind": kind})
+    store.record_compatibility_report("draft", draft_hash, report_payload, report_hash)
+    _json(
+        {
+            "draft_hash": draft_hash,
+            "upstream_incompatibility_verified": (
+                result.upstream_incompatibility_verified
+            ),
+            "ported_patch_applies": result.ported_patch.applies_cleanly,
+            "report_hash": report_hash,
+            "status": "blocked",
+        }
+    )
+    raise typer.Exit(2)
+
+
+def _build_source_compatibility_steps(
+    source_artifact: ArtifactRef,
+    target: ArtifactRef | None,
+    dflash: ArtifactRef | None,
+    capture: ArtifactRef | None,
+    ingest: ArtifactRef | None,
+) -> tuple[CompatibilityStepResult, ...]:
     steps: list[CompatibilityStepResult] = []
     for name in COMPATIBILITY_LADDER:
         status = CompatibilityStatus.NOT_RUN
@@ -209,6 +261,14 @@ def probe_source_compatibility(
                     "ported capture patch applies to exact SGLang source; "
                     "physical Laguna capture has not passed"
                 )
+        elif name == "specforge-batch-ingest" and ingest is not None:
+            status = CompatibilityStatus.PASSED
+            evidence = (ingest,)
+            evidence_level = EvidenceLevel.PHYSICAL_GPU
+            detail = (
+                "SpecForge materialized exact DFlash tensors, drained the release "
+                "queue, bounded helper shutdown, and cleaned all resources"
+            )
         steps.append(
             CompatibilityStepResult(
                 name=name,
@@ -218,32 +278,7 @@ def probe_source_compatibility(
                 detail=detail,
             )
         )
-    report = CompatibilityReport(
-        identity_kind="draft",
-        experiment_identity=draft_hash,
-        steps=tuple(steps),
-        cleanup_verified=False,
-    )
-    report_payload = report.model_dump(mode="json")
-    report_hash = canonical_sha256(report_payload)
-    store = _store(database_url, schema)
-    store.record_artifact(source_artifact, result.model_dump(mode="json"))
-    for item in (target, dflash, capture):
-        if item is not None:
-            store.record_artifact(item, {"kind": "static-serving-probe"})
-    store.record_compatibility_report("draft", draft_hash, report_payload, report_hash)
-    _json(
-        {
-            "draft_hash": draft_hash,
-            "upstream_incompatibility_verified": (
-                result.upstream_incompatibility_verified
-            ),
-            "ported_patch_applies": result.ported_patch.applies_cleanly,
-            "report_hash": report_hash,
-            "status": "blocked",
-        }
-    )
-    raise typer.Exit(2)
+    return tuple(steps)
 
 
 def _probe_artifact(path: Path) -> ArtifactRef | None:
