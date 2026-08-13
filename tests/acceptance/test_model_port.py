@@ -5,6 +5,7 @@ import pytest
 from aurorapp.model_port import (
     CapturedBatchOptimizerResult,
     CheckpointReloadResult,
+    DraftExecutionState,
     DraftProbeInputHashes,
     LagunaDFlashConfigContract,
     PhysicalModelPortResult,
@@ -12,6 +13,21 @@ from aurorapp.model_port import (
     probe_wire_json,
     validate_checkpoint_header,
 )
+
+
+def execution_state() -> DraftExecutionState:
+    return DraftExecutionState(
+        nonpersistent_buffer_digest="a" * 64,
+        parameter_layout_digest="b" * 64,
+        module_modes_digest="c" * 64,
+        runtime_config_digest="d" * 64,
+        float32_matmul_precision="highest",
+        cudnn_benchmark=False,
+        cudnn_deterministic=False,
+        deterministic_algorithms=False,
+        cublas_allow_tf32=False,
+        cudnn_allow_tf32=True,
+    )
 
 
 def official_config() -> LagunaDFlashConfigContract:
@@ -144,6 +160,10 @@ def test_captured_batch_optimizer_requires_reload_and_complete_checkpoint() -> N
                 "position_ids": "3" * 64,
             },
             "inputs_equal": True,
+            "reference_execution_state": execution_state().model_dump(mode="json"),
+            "observed_execution_state": execution_state().model_dump(mode="json"),
+            "reference_repeat_equal": True,
+            "observed_repeat_equal": True,
             "output_equal": True,
             "output_allclose": True,
             "output_mismatch_count": 0,
@@ -191,6 +211,10 @@ def test_captured_batch_optimizer_requires_checkpoint_path_at_construction() -> 
                         "position_ids": "3" * 64,
                     },
                     "inputs_equal": True,
+                    "reference_execution_state": execution_state().model_dump(mode="json"),
+                    "observed_execution_state": execution_state().model_dump(mode="json"),
+                    "reference_repeat_equal": True,
+                    "observed_repeat_equal": True,
                     "output_equal": True,
                     "output_allclose": True,
                     "output_mismatch_count": 0,
@@ -216,6 +240,10 @@ def test_reload_diagnostic_does_not_replace_exact_parity_with_allclose() -> None
             position_ids="3" * 64,
         ),
         inputs_equal=True,
+        reference_execution_state=execution_state(),
+        observed_execution_state=execution_state(),
+        reference_repeat_equal=True,
+        observed_repeat_equal=True,
         output_equal=False,
         output_allclose=True,
         output_mismatch_count=1,
@@ -239,6 +267,10 @@ def test_reload_diagnostic_wire_record_excludes_computed_passed_field() -> None:
             position_ids="3" * 64,
         ),
         inputs_equal=True,
+        reference_execution_state=execution_state(),
+        observed_execution_state=execution_state(),
+        reference_repeat_equal=True,
+        observed_repeat_equal=True,
         output_equal=True,
         output_allclose=True,
         output_mismatch_count=0,
@@ -293,6 +325,10 @@ def test_probe_wire_record_excludes_nested_computed_fields() -> None:
                     "position_ids": "9" * 64,
                 },
                 "inputs_equal": True,
+                "reference_execution_state": execution_state().model_dump(mode="json"),
+                "observed_execution_state": execution_state().model_dump(mode="json"),
+                "reference_repeat_equal": True,
+                "observed_repeat_equal": True,
                 "output_equal": True,
                 "output_allclose": True,
                 "output_mismatch_count": 0,

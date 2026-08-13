@@ -30,6 +30,7 @@ from aurorapp.model_port import (
     CapturedBatchOptimizerResult,
     CheckpointReferenceResult,
     CheckpointReloadResult,
+    DraftExecutionState,
     DraftProbeInputHashes,
     probe_wire_json,
 )
@@ -77,6 +78,49 @@ def tensor_hash(tensor: torch.Tensor) -> str:
     digest.update(b"\0")
     digest.update(value.view(torch.uint8).numpy().tobytes())
     return digest.hexdigest()
+
+
+def json_hash(value: object) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def draft_execution_state(model: torch.nn.Module) -> DraftExecutionState:
+    nonpersistent_buffers: list[dict[str, object]] = []
+    for module_name, module in model.named_modules():
+        for name in sorted(module._non_persistent_buffers_set):
+            value = module._buffers.get(name)
+            nonpersistent_buffers.append(
+                {
+                    "name": ".".join(part for part in (module_name, name) if part),
+                    "value": None if value is None else tensor_hash(value),
+                }
+            )
+    parameter_layout = [
+        {
+            "name": name,
+            "shape": tuple(parameter.shape),
+            "stride": tuple(parameter.stride()),
+            "storage_offset": parameter.storage_offset(),
+            "contiguous": parameter.is_contiguous(),
+        }
+        for name, parameter in sorted(model.named_parameters())
+    ]
+    module_modes = [
+        {"name": name, "training": module.training} for name, module in model.named_modules()
+    ]
+    return DraftExecutionState(
+        nonpersistent_buffer_digest=json_hash(nonpersistent_buffers),
+        parameter_layout_digest=json_hash(parameter_layout),
+        module_modes_digest=json_hash(module_modes),
+        runtime_config_digest=json_hash(model.config.to_dict()),
+        float32_matmul_precision=torch.get_float32_matmul_precision(),
+        cudnn_benchmark=torch.backends.cudnn.benchmark,
+        cudnn_deterministic=torch.backends.cudnn.deterministic,
+        deterministic_algorithms=torch.are_deterministic_algorithms_enabled(),
+        cublas_allow_tf32=torch.backends.cuda.matmul.allow_tf32,
+        cudnn_allow_tf32=torch.backends.cudnn.allow_tf32,
+    )
 
 
 def draft_probe_inputs() -> dict[str, torch.Tensor]:
@@ -145,11 +189,15 @@ def write_reference(checkpoint: Path, reference_path: Path) -> None:
     inputs = draft_probe_inputs()
     input_hashes = draft_input_hashes(inputs)
     output = deterministic_draft_output(model, inputs)
+    repeated_output = deterministic_draft_output(model, inputs)
+    execution_state = draft_execution_state(model)
     torch.save(
         {
+            "execution_state": execution_state.model_dump(mode="json"),
             "inputs": inputs,
             "input_hashes": input_hashes.model_dump(mode="json"),
             "output": output,
+            "repeat_equal": bool(torch.equal(output, repeated_output)),
             "state_digest": digest,
         },
         reference_path,
@@ -157,9 +205,11 @@ def write_reference(checkpoint: Path, reference_path: Path) -> None:
     result = CheckpointReferenceResult(
         state_digest=digest,
         input_hashes=input_hashes,
+        execution_state=execution_state,
+        repeat_equal=bool(torch.equal(output, repeated_output)),
         reference_path=str(reference_path),
     )
-    del model, output
+    del model, output, repeated_output
     gc.collect()
     torch.cuda.empty_cache()
     print("AURORAPP_REFERENCE_RESULT=" + result.model_dump_json(), flush=True)
@@ -172,9 +222,12 @@ def reload_checkpoint(checkpoint: Path, reference_path: Path) -> None:
     expected_state_digest = reference["state_digest"]
     inputs = reference["inputs"]
     expected_input_hashes = DraftProbeInputHashes.model_validate(reference["input_hashes"])
+    reference_execution_state = DraftExecutionState.model_validate(reference["execution_state"])
     observed_input_hashes = draft_input_hashes(inputs)
     observed_state_digest = state_digest(model)
     observed = deterministic_draft_output(model, inputs)
+    repeated_observed = deterministic_draft_output(model, inputs)
+    observed_execution_state = draft_execution_state(model)
     difference = (expected.float() - observed.float()).abs()
     result = CheckpointReloadResult(
         missing=tuple(loading.get("missing_keys") or ()),
@@ -184,13 +237,17 @@ def reload_checkpoint(checkpoint: Path, reference_path: Path) -> None:
         state_equal=observed_state_digest == expected_state_digest,
         input_hashes=observed_input_hashes,
         inputs_equal=observed_input_hashes == expected_input_hashes,
+        reference_execution_state=reference_execution_state,
+        observed_execution_state=observed_execution_state,
+        reference_repeat_equal=bool(reference["repeat_equal"]),
+        observed_repeat_equal=bool(torch.equal(observed, repeated_observed)),
         output_equal=bool(torch.equal(expected, observed)),
         output_allclose=bool(torch.allclose(expected, observed, rtol=1e-5, atol=1e-6)),
         output_mismatch_count=int(torch.count_nonzero(expected != observed).item()),
         output_max_abs_difference=float(difference.max().item()),
         output_mean_abs_difference=float(difference.mean().item()),
     )
-    del model, expected, observed, difference, reference
+    del model, expected, observed, repeated_observed, difference, reference
     gc.collect()
     torch.cuda.empty_cache()
     print(
@@ -389,13 +446,17 @@ def train(args: argparse.Namespace) -> None:
         inputs = draft_probe_inputs()
         input_hashes = draft_input_hashes(inputs)
         reference = deterministic_draft_output(training_model.draft_model, inputs)
+        repeated_reference = deterministic_draft_output(training_model.draft_model, inputs)
+        execution_state = draft_execution_state(training_model.draft_model)
         reference_state_digest = state_digest(training_model.draft_model)
         reference_path = Path("/tmp") / f"aurorapp-reload-{uuid.uuid4()}.pt"
         torch.save(
             {
+                "execution_state": execution_state.model_dump(mode="json"),
                 "inputs": inputs,
                 "input_hashes": input_hashes.model_dump(mode="json"),
                 "output": reference,
+                "repeat_equal": bool(torch.equal(reference, repeated_reference)),
                 "state_digest": reference_state_digest,
             },
             reference_path,
@@ -411,7 +472,8 @@ def train(args: argparse.Namespace) -> None:
         accuracy_denom = int(step.metrics["accuracy_denom"].detach().item())
         optimizer_entries = len(optimizer.state)
         shapes = {name: tuple(tensor.shape) for name, tensor in batch.tensors.items()}
-        del strategy, training_model, optimizer, parameters, before, reference, step, trainable
+        del strategy, training_model, optimizer, parameters, before, reference
+        del repeated_reference, step, trainable
         gc.collect()
         torch.cuda.empty_cache()
         reload_process = subprocess.run(

@@ -163,6 +163,10 @@ class CheckpointReloadResult(StrictModel):
     state_equal: bool
     input_hashes: "DraftProbeInputHashes"
     inputs_equal: bool
+    reference_execution_state: "DraftExecutionState"
+    observed_execution_state: "DraftExecutionState"
+    reference_repeat_equal: bool
+    observed_repeat_equal: bool
     output_equal: bool
     output_allclose: bool
     output_mismatch_count: int = Field(ge=0)
@@ -178,6 +182,9 @@ class CheckpointReloadResult(StrictModel):
             and self.state_equal
             and self.state_digest == self.reference_state_digest
             and self.inputs_equal
+            and self.reference_execution_state == self.observed_execution_state
+            and self.reference_repeat_equal
+            and self.observed_repeat_equal
             and self.output_equal
             and self.output_allclose
             and self.output_mismatch_count == 0
@@ -189,6 +196,8 @@ class CheckpointReloadResult(StrictModel):
 class CheckpointReferenceResult(StrictModel):
     state_digest: Sha256
     input_hashes: "DraftProbeInputHashes"
+    execution_state: "DraftExecutionState"
+    repeat_equal: bool
     reference_path: str = Field(min_length=1)
 
 
@@ -196,6 +205,19 @@ class DraftProbeInputHashes(StrictModel):
     noise_embedding: Sha256
     target_hidden: Sha256
     position_ids: Sha256
+
+
+class DraftExecutionState(StrictModel):
+    nonpersistent_buffer_digest: Sha256
+    parameter_layout_digest: Sha256
+    module_modes_digest: Sha256
+    runtime_config_digest: Sha256
+    float32_matmul_precision: str = Field(min_length=1)
+    cudnn_benchmark: bool
+    cudnn_deterministic: bool
+    deterministic_algorithms: bool
+    cublas_allow_tf32: bool
+    cudnn_allow_tf32: bool
 
 
 def probe_wire_json(result: StrictModel) -> str:
