@@ -49,8 +49,16 @@ sglang_image = (
         "git -C /opt/sglang apply /opt/aurorapp/spec-capture.patch",
         "python -m pip install --upgrade pip uv",
         "uv pip install --system -e '/opt/sglang/python[all]'",
-        "uv pip install --system mooncake-transfer-engine==0.3.12.post1",
-        "ldd /usr/local/lib/python3.12/site-packages/mooncake/mooncake_master",
+        "uv pip install --system mooncake-transfer-engine-cuda13==0.3.12.post1",
+        (
+            "python -c \"import subprocess; "
+            "output = subprocess.run(['ldd', "
+            "'/usr/local/lib/python3.12/site-packages/mooncake/mooncake_master'], "
+            "check=True, capture_output=True, text=True).stdout; print(output); "
+            "missing = [line for line in output.splitlines() "
+            "if 'not found' in line and 'libcuda.so.1' not in line]; "
+            "assert not missing, missing\""
+        ),
         "uv pip uninstall --system sgl-deep-gemm",
     )
     .env(
