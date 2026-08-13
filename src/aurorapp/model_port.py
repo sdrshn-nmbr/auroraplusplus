@@ -102,6 +102,20 @@ class ParentDrafterRestoreResult(StrictModel):
         )
 
 
+def candidate_serving_from_probe_payload(
+    payload: Mapping[str, object],
+) -> CandidateSpeculativeServingResult:
+    clean = dict(payload)
+    clean.pop("passed", None)
+    telemetry = clean.get("speculative_telemetry")
+    if not isinstance(telemetry, Mapping):
+        raise ValueError("candidate serving payload has no speculative telemetry")
+    clean["speculative_telemetry"] = {
+        key: value for key, value in telemetry.items() if key != "passed"
+    }
+    return CandidateSpeculativeServingResult.model_validate(clean)
+
+
 class LagunaDFlashMethodContract(StrictModel):
     block_size: int = Field(ge=2)
     mask_token_id: int = Field(ge=0)

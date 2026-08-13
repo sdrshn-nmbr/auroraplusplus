@@ -23,6 +23,7 @@ from aurorapp.model_port import (
     CheckpointReloadResult,
     ParentDrafterRestoreResult,
     PhysicalModelPortResult,
+    candidate_serving_from_probe_payload,
 )
 from aurorapp.models import ArtifactRef
 from aurorapp.sglang_contract import SGLANG_SERVER_RANDOM_SEED, greedy_generation_request
@@ -1428,7 +1429,7 @@ def main(
             candidate_record = json.loads(
                 Path(candidate_serving_evidence).read_text(encoding="utf-8")
             )
-            candidate = CandidateSpeculativeServingResult.model_validate(
+            candidate = candidate_serving_from_probe_payload(
                 candidate_record["result"]["result"]
             )
             if candidate_record.get("status") != "passed" or not candidate.passed:

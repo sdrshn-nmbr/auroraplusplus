@@ -12,6 +12,7 @@ from aurorapp.model_port import (
     LagunaDFlashConfigContract,
     ParentDrafterRestoreResult,
     PhysicalModelPortResult,
+    candidate_serving_from_probe_payload,
     checkpoint_contract,
     draft_runtime_config,
     probe_wire_json,
@@ -83,6 +84,9 @@ def test_candidate_serving_requires_lossless_output_and_real_dflash_work() -> No
         }
     )
     assert no_draft_work.passed is False
+
+    wire_payload = result.model_dump(mode="json")
+    assert candidate_serving_from_probe_payload(wire_payload) == result
 
 
 def test_parent_restore_requires_original_output_and_real_dflash_work() -> None:
