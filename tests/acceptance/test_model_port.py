@@ -11,6 +11,7 @@ from aurorapp.model_port import (
     LagunaDFlashConfigContract,
     PhysicalModelPortResult,
     checkpoint_contract,
+    draft_runtime_config,
     probe_wire_json,
     validate_checkpoint_header,
 )
@@ -38,6 +39,42 @@ def test_training_wrapper_does_not_cast_nonpersistent_model_buffers() -> None:
 
     assert 'loss_type="dflash",\n    ).to(device="cuda")' in source
     assert 'loss_type="dflash",\n    ).to(device="cuda", dtype=torch.bfloat16)' not in source
+
+
+def test_runtime_config_ignores_load_path_but_keeps_execution_fields() -> None:
+    base = {
+        "_name_or_path": "poolside/draft",
+        "model_type": "laguna",
+        "hidden_size": 2048,
+        "intermediate_size": 8192,
+        "num_hidden_layers": 5,
+        "num_attention_heads": 64,
+        "num_key_value_heads": 8,
+        "head_dim": 128,
+        "rms_norm_eps": 1e-6,
+        "max_position_embeddings": 262144,
+        "sliding_window": 512,
+        "rope_theta": 500000.0,
+        "attention_dropout": 0.0,
+        "gating": "per-head",
+        "layer_types": ["sliding_attention"] * 5,
+        "dflash_config": {
+            "block_size": 16,
+            "mask_token_id": 12,
+            "num_target_layers": 40,
+            "target_layer_ids": [1, 13, 25, 33, 39],
+            "causal": True,
+        },
+    }
+
+    hub = draft_runtime_config(base, attention_implementation="eager")
+    checkpoint = draft_runtime_config(
+        {**base, "_name_or_path": "/checkpoints/candidate"},
+        attention_implementation="eager",
+    )
+
+    assert hub == checkpoint
+    assert draft_runtime_config(base, attention_implementation="sdpa") != hub
 
 
 def official_config() -> LagunaDFlashConfigContract:

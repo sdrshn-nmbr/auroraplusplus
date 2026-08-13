@@ -32,6 +32,7 @@ from aurorapp.model_port import (
     CheckpointReloadResult,
     DraftExecutionState,
     DraftProbeInputHashes,
+    draft_runtime_config,
     probe_wire_json,
 )
 
@@ -113,7 +114,12 @@ def draft_execution_state(model: torch.nn.Module) -> DraftExecutionState:
         nonpersistent_buffer_digest=json_hash(nonpersistent_buffers),
         parameter_layout_digest=json_hash(parameter_layout),
         module_modes_digest=json_hash(module_modes),
-        runtime_config_digest=json_hash(model.config.to_dict()),
+        runtime_config_digest=json_hash(
+            draft_runtime_config(
+                model.config.to_dict(),
+                attention_implementation=model.config._attn_implementation,
+            ).model_dump(mode="json")
+        ),
         float32_matmul_precision=torch.get_float32_matmul_precision(),
         cudnn_benchmark=torch.backends.cudnn.benchmark,
         cudnn_deterministic=torch.backends.cudnn.deterministic,

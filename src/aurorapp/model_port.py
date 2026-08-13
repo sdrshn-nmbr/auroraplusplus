@@ -220,6 +220,36 @@ class DraftExecutionState(StrictModel):
     cudnn_allow_tf32: bool
 
 
+class DraftRuntimeConfig(StrictModel):
+    model_type: Literal["laguna"]
+    hidden_size: int = Field(gt=0)
+    intermediate_size: int = Field(gt=0)
+    num_hidden_layers: int = Field(gt=0)
+    num_attention_heads: int = Field(gt=0)
+    num_key_value_heads: int = Field(gt=0)
+    head_dim: int = Field(gt=0)
+    rms_norm_eps: float = Field(gt=0)
+    max_position_embeddings: int = Field(gt=0)
+    sliding_window: int = Field(gt=0)
+    rope_theta: float = Field(gt=0)
+    attention_dropout: float = Field(ge=0)
+    attention_implementation: str = Field(min_length=1)
+    gating: Literal["per-head"]
+    layer_types: tuple[Literal["sliding_attention"], ...]
+    dflash_config: LagunaDFlashMethodContract
+
+
+def draft_runtime_config(
+    config: Mapping[str, object],
+    *,
+    attention_implementation: str,
+) -> DraftRuntimeConfig:
+    fields = DraftRuntimeConfig.model_fields
+    payload = {name: config[name] for name in fields if name in config}
+    payload["attention_implementation"] = attention_implementation
+    return DraftRuntimeConfig.model_validate(payload)
+
+
 def probe_wire_json(result: StrictModel) -> str:
     return result.model_dump_json(exclude_computed_fields=True)
 
