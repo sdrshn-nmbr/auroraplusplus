@@ -1,6 +1,7 @@
 import json
 
 from aurorapp.model_port import (
+    CapturedBatchOptimizerResult,
     LagunaDFlashConfigContract,
     PhysicalModelPortResult,
     checkpoint_contract,
@@ -96,3 +97,44 @@ def test_physical_port_result_requires_every_laguna_gradient_surface() -> None:
     payload["gradient_parameters"].remove("aux_hidden_norms.0.weight")
     invalid = PhysicalModelPortResult.model_validate(payload)
     assert invalid.passed is False
+
+
+def test_captured_batch_optimizer_requires_reload_and_complete_checkpoint() -> None:
+    payload = {
+        "sample_id": "laguna-live-batch-1",
+        "input_ids_shape": [1, 4],
+        "loss_mask_shape": [1, 4],
+        "hidden_states_shape": [1, 4, 10240],
+        "loss": 1.25,
+        "accuracy": 0.5,
+        "accuracy_denom": 2,
+        "gradient_parameters": [
+            "draft_model.layers.0.self_attn.qkv_proj.weight",
+            "draft_model.layers.0.self_attn.g_proj.weight",
+            "draft_model.fc.weight",
+            "draft_model.aux_hidden_norms.0.weight",
+        ],
+        "optimizer_state_entries": 58,
+        "changed_parameter": "draft_model.layers.0.self_attn.g_proj.weight",
+        "parameter_delta": 1.0,
+        "checkpoint_hashes": {
+            "config": "e" * 64,
+            "weights": "a" * 64,
+            "optimizer": "b" * 64,
+            "random_state": "c" * 64,
+            "manifest": "d" * 64,
+        },
+        "checkpoint_path": "/checkpoints/objects/dd/candidate",
+        "training_cursor": 1,
+        "reload_missing": [],
+        "reload_unexpected": [],
+        "reload_output_equal": True,
+        "released": True,
+        "release_pending": 0,
+    }
+
+    result = CapturedBatchOptimizerResult.model_validate(payload)
+
+    assert result.passed is True
+    payload["checkpoint_hashes"].pop("random_state")
+    assert CapturedBatchOptimizerResult.model_validate(payload).passed is False

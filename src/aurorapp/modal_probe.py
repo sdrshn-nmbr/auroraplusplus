@@ -16,7 +16,7 @@ import modal
 
 from aurorapp.artifacts import ContentAddressedArtifactStore
 from aurorapp.canonical import canonical_bytes
-from aurorapp.model_port import PhysicalModelPortResult
+from aurorapp.model_port import CapturedBatchOptimizerResult, PhysicalModelPortResult
 from aurorapp.models import ArtifactRef
 from aurorapp.sglang_contract import SGLANG_SERVER_RANDOM_SEED, greedy_generation_request
 
@@ -88,6 +88,11 @@ specforge_image = (
         copy=True,
     )
     .add_local_file(
+        "scripts/specforge_captured_optimizer_probe.py",
+        "/opt/aurorapp/specforge_captured_optimizer_probe.py",
+        copy=True,
+    )
+    .add_local_file(
         "patches/specforge/e6440f09/laguna-dflash-training.patch",
         "/opt/aurorapp/laguna-dflash-training.patch",
         copy=True,
@@ -110,6 +115,9 @@ specforge_image = (
 )
 
 model_cache = modal.Volume.from_name("aurorapp-model-cache", create_if_missing=True)
+checkpoint_volume = modal.Volume.from_name(
+    "aurorapp-compatibility-checkpoints", create_if_missing=True
+)
 
 
 def _run(command: list[str]) -> str:
@@ -479,6 +487,56 @@ def _model_port_optimizer() -> dict[str, Any]:
     }
 
 
+def _captured_batch_optimizer(port: int) -> dict[str, Any]:
+    command = [
+        "python",
+        "/opt/aurorapp/specforge_captured_optimizer_probe.py",
+        "--base-url",
+        f"http://127.0.0.1:{port}",
+        "--target-repository",
+        TARGET_REPOSITORY,
+        "--target-revision",
+        TARGET_REVISION,
+        "--draft-repository",
+        DRAFT_REPOSITORY,
+        "--draft-revision",
+        DRAFT_REVISION,
+        "--checkpoint-root",
+        "/checkpoints",
+    ]
+    execution = _run_until_terminal_record(
+        command,
+        marker="AURORAPP_RESULT=",
+        timeout=1200,
+    )
+    records = execution["terminal_records"]
+    if execution["timed_out"] or len(records) != 1:
+        return {
+            "passed": False,
+            "command": command,
+            "execution": execution,
+            "error": "captured optimizer probe did not return one terminal record",
+        }
+    try:
+        result = CapturedBatchOptimizerResult.model_validate_json(records[0])
+    except (ValueError, TypeError) as error:
+        return {
+            "passed": False,
+            "command": command,
+            "execution": execution,
+            "error": str(error),
+        }
+    if result.passed:
+        checkpoint_volume.commit()
+    return {
+        "passed": result.passed,
+        "command": command,
+        "execution": execution,
+        "result": result.model_dump(mode="json"),
+        "volume_committed": result.passed,
+    }
+
+
 def _port_is_closed(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client:
         client.settimeout(1)
@@ -700,8 +758,11 @@ def _capture_server_probe(
     repository_revision: str,
     *,
     specforge_ingest: bool = False,
+    captured_optimizer: bool = False,
 ) -> dict[str, Any]:
-    port = 33000 if specforge_ingest else 32000
+    if specforge_ingest and captured_optimizer:
+        raise ValueError("capture probe accepts one SpecForge workload")
+    port = 34000 if captured_optimizer else (33000 if specforge_ingest else 32000)
     os.environ.update(
         {
             "MOONCAKE_MASTER_SERVER_ADDR": "127.0.0.1:50051",
@@ -751,9 +812,21 @@ def _capture_server_probe(
     try:
         _wait_for_server(port, process, timeout=900)
         server_healthy = True
-        workload = (
-            _specforge_ingest_after_prewarm(port) if specforge_ingest else _capture_generate(port)
-        )
+        if captured_optimizer:
+            prewarm = _capture_generate(port)
+            workload = (
+                {**_captured_batch_optimizer(port), "prewarm": prewarm}
+                if prewarm.get("passed") is True
+                else {
+                    "passed": False,
+                    "prewarm": prewarm,
+                    "error": "Mooncake capture sink prewarm failed",
+                }
+            )
+        elif specforge_ingest:
+            workload = _specforge_ingest_after_prewarm(port)
+        else:
+            workload = _capture_generate(port)
     except Exception as exception:
         error = {"type": type(exception).__name__, "message": str(exception)}
     finally:
@@ -777,7 +850,11 @@ def _capture_server_probe(
         "hardware": _hardware_identity(),
         "runtime": _runtime_identity(repository_revision),
         "server_healthy": server_healthy,
-        "ingest" if specforge_ingest else "capture": workload,
+        (
+            "captured_optimizer"
+            if captured_optimizer
+            else ("ingest" if specforge_ingest else "capture")
+        ): workload,
         "launch_command": command,
         "error": error,
         "cleanup": {"server": server_cleanup, "mooncake": master_cleanup},
@@ -862,6 +939,24 @@ def specforge_laguna_model_port_probe(repository_revision: str) -> dict[str, Any
     }
 
 
+@app.function(
+    image=specforge_image,
+    gpu="H100!",
+    timeout=2400,
+    volumes={
+        "/root/.cache/huggingface": model_cache,
+        "/checkpoints": checkpoint_volume,
+    },
+    single_use_containers=True,
+    restrict_modal_access=True,
+    name="specforge-laguna-captured-optimizer-probe",
+)
+def specforge_laguna_captured_optimizer_probe(
+    repository_revision: str,
+) -> dict[str, Any]:
+    return _capture_server_probe(repository_revision, captured_optimizer=True)
+
+
 @app.local_entrypoint()
 def main(probe: str = "identity", output: str = "", allow_dirty: bool = False) -> None:
     revision = _local_repository_revision(allow_dirty)
@@ -878,9 +973,12 @@ def main(probe: str = "identity", output: str = "", allow_dirty: bool = False) -
             result = specforge_batch_ingest_probe.remote(revision)
         elif probe == "model-port":
             result = specforge_laguna_model_port_probe.remote(revision)
+        elif probe == "captured-optimizer":
+            result = specforge_laguna_captured_optimizer_probe.remote(revision)
         else:
             raise ValueError(
-                "probe must be identity, target, dflash, capture, ingest, or model-port"
+                "probe must be identity, target, dflash, capture, ingest, "
+                "model-port, or captured-optimizer"
             )
         remote_status = result.get("status") if isinstance(result, dict) else None
         record: dict[str, Any] = {
@@ -889,7 +987,11 @@ def main(probe: str = "identity", output: str = "", allow_dirty: bool = False) -
             "result": result,
             "repository_revision": revision,
             "modal_image_id": (
-                (specforge_image.object_id if probe == "ingest" else sglang_image.object_id)
+                (
+                    specforge_image.object_id
+                    if probe in {"ingest", "model-port", "captured-optimizer"}
+                    else sglang_image.object_id
+                )
                 if probe != "identity"
                 else base_image.object_id
             ),

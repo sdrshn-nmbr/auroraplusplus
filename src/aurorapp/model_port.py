@@ -1,12 +1,13 @@
 import json
 import math
 import struct
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Literal
 
 from pydantic import ConfigDict, Field, computed_field, model_validator
 
-from aurorapp.models import StrictModel
+from aurorapp.models import Sha256, StrictModel
 
 
 class LagunaDFlashMethodContract(StrictModel):
@@ -96,6 +97,72 @@ class PhysicalModelPortResult(StrictModel):
         )
 
 
+class CapturedBatchOptimizerResult(StrictModel):
+    sample_id: str = Field(min_length=1)
+    input_ids_shape: tuple[int, int]
+    loss_mask_shape: tuple[int, int]
+    hidden_states_shape: tuple[int, int, int]
+    loss: float
+    accuracy: float
+    accuracy_denom: int = Field(ge=0)
+    gradient_parameters: tuple[str, ...]
+    optimizer_state_entries: int = Field(ge=0)
+    changed_parameter: Literal["draft_model.layers.0.self_attn.g_proj.weight"]
+    parameter_delta: float = Field(ge=0)
+    checkpoint_hashes: dict[str, Sha256]
+    checkpoint_path: str = Field(min_length=1)
+    training_cursor: Literal[1]
+    reload_missing: tuple[str, ...]
+    reload_unexpected: tuple[str, ...]
+    reload_output_equal: bool
+    released: bool
+    release_pending: int = Field(ge=0)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def passed(self) -> bool:
+        required_gradients = {
+            "draft_model.layers.0.self_attn.qkv_proj.weight",
+            "draft_model.layers.0.self_attn.g_proj.weight",
+            "draft_model.fc.weight",
+            "draft_model.aux_hidden_norms.0.weight",
+        }
+        required_checkpoint_files = {
+            "config",
+            "weights",
+            "optimizer",
+            "random_state",
+            "manifest",
+        }
+        return (
+            bool(self.sample_id)
+            and self.input_ids_shape == (1, 4)
+            and self.loss_mask_shape == (1, 4)
+            and self.hidden_states_shape == (1, 4, 10240)
+            and math.isfinite(self.loss)
+            and self.loss > 0
+            and math.isfinite(self.accuracy)
+            and 0 <= self.accuracy <= 1
+            and self.accuracy_denom > 0
+            and required_gradients.issubset(self.gradient_parameters)
+            and self.optimizer_state_entries > 0
+            and math.isfinite(self.parameter_delta)
+            and self.parameter_delta > 0
+            and required_checkpoint_files == set(self.checkpoint_hashes)
+            and not self.reload_missing
+            and not self.reload_unexpected
+            and self.reload_output_equal
+            and self.released
+            and self.release_pending == 0
+        )
+
+
+class CheckpointReloadResult(StrictModel):
+    missing: tuple[str, ...]
+    unexpected: tuple[str, ...]
+    output_equal: bool
+
+
 def checkpoint_contract(
     config: LagunaDFlashConfigContract,
 ) -> dict[str, CheckpointTensor]:
@@ -146,7 +213,7 @@ def checkpoint_contract(
 
 def validate_checkpoint_header(
     config: LagunaDFlashConfigContract,
-    header: dict[str, object],
+    header: Mapping[str, object],
 ) -> CheckpointHeaderResult:
     expected = checkpoint_contract(config)
     observed_names = set(header) - {"__metadata__"}
