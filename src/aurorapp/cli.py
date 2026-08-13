@@ -194,6 +194,10 @@ def probe_source_compatibility(
         evidence_directory / "specforge-batch-ingest.json",
         "ingest",
     )
+    captured_optimizer = _passing_probe_artifact(
+        evidence_directory / "specforge-laguna-captured-optimizer.json",
+        "captured-optimizer",
+    )
     steps = _build_source_compatibility_steps(
         source_artifact,
         target,
@@ -201,6 +205,7 @@ def probe_source_compatibility(
         capture,
         ingest,
         training_model=training_model_artifact,
+        captured_optimizer=captured_optimizer,
         training_model_compatible=training_model_port.upstream.compatible,
         training_model_port_ready=training_model_port.ready_for_physical_probe,
     )
@@ -219,6 +224,7 @@ def probe_source_compatibility(
         (dflash, "dflash-serving"),
         (capture, "target-hidden-state-capture"),
         (ingest, "specforge-batch-ingest"),
+        (captured_optimizer, "captured-optimizer"),
         (training_model_artifact, "training-model-compatibility"),
     )
     for item, kind in probe_artifacts:
@@ -228,9 +234,7 @@ def probe_source_compatibility(
     _json(
         {
             "draft_hash": draft_hash,
-            "upstream_incompatibility_verified": (
-                result.upstream_incompatibility_verified
-            ),
+            "upstream_incompatibility_verified": (result.upstream_incompatibility_verified),
             "ported_patch_applies": result.ported_patch.applies_cleanly,
             "training_model_compatible": training_model_port.upstream.compatible,
             "training_model_port_ready": training_model_port.ready_for_physical_probe,
@@ -249,6 +253,7 @@ def _build_source_compatibility_steps(
     ingest: ArtifactRef | None,
     *,
     training_model: ArtifactRef | None = None,
+    captured_optimizer: ArtifactRef | None = None,
     training_model_compatible: bool | None = None,
     training_model_port_ready: bool = False,
 ) -> tuple[CompatibilityStepResult, ...]:
@@ -290,6 +295,38 @@ def _build_source_compatibility_steps(
                 "SpecForge materialized exact DFlash tensors, drained the release "
                 "queue, bounded helper shutdown, and cleaned all resources"
             )
+        elif (
+            name
+            in {
+                "bounded-optimizer-step",
+                "complete-checkpoint-save",
+                "fresh-process-reload",
+                "reloaded-logit-parity",
+            }
+            and captured_optimizer is not None
+        ):
+            status = CompatibilityStatus.PASSED
+            evidence = (captured_optimizer,)
+            evidence_level = EvidenceLevel.PHYSICAL_GPU
+            details = {
+                "bounded-optimizer-step": (
+                    "live captured batch produced finite DFlash loss, required "
+                    "Laguna gradients, and one AdamW parameter update"
+                ),
+                "complete-checkpoint-save": (
+                    "content-addressed weights, optimizer, random state, cursor, "
+                    "configuration, and manifest were written and committed"
+                ),
+                "fresh-process-reload": (
+                    "a fresh H100 process loaded all 58 tensors with matching state, "
+                    "buffer, layout, mode, and runtime configuration hashes"
+                ),
+                "reloaded-logit-parity": (
+                    "the trained process and fresh reload produced bit-exact draft "
+                    "outputs for identical hashed inputs"
+                ),
+            }
+            detail = details[name]
         elif name == "bounded-optimizer-step" and training_model is not None:
             evidence = (training_model,)
             if training_model_compatible is False and training_model_port_ready:
