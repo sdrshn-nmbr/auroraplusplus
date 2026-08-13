@@ -167,6 +167,7 @@ def test_source_report_binds_passing_specforge_ingest_evidence() -> None:
         *items[:5],
         training_model=items[5],
         training_model_compatible=False,
+        training_model_port_ready=True,
     )
     ingest = steps[COMPATIBILITY_LADDER.index("specforge-batch-ingest")]
 
@@ -174,5 +175,5 @@ def test_source_report_binds_passing_specforge_ingest_evidence() -> None:
     assert ingest.evidence_level is EvidenceLevel.PHYSICAL_GPU
     assert ingest.evidence == (items[4],)
     optimizer = steps[COMPATIBILITY_LADDER.index("bounded-optimizer-step")]
-    assert optimizer.status is CompatibilityStatus.FAILED
+    assert optimizer.status is CompatibilityStatus.NOT_RUN
     assert optimizer.evidence == (items[5],)

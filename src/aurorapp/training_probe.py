@@ -6,19 +6,29 @@ import tempfile
 from pathlib import Path
 
 from huggingface_hub import hf_hub_download
+from pydantic import computed_field
 
+from aurorapp.model_port import (
+    CheckpointHeaderResult,
+    LagunaDFlashConfigContract,
+    read_safetensors_header,
+    validate_checkpoint_header,
+)
 from aurorapp.models import GitRevision, Sha256, StrictModel
 from aurorapp.source_probe import (
     SPECFORGE_REPOSITORY,
     SPECFORGE_REVISION,
+    PatchApplicationResult,
     _clone_exact,
     _revision,
+    check_patch_application,
 )
 
 DRAFTER_REPOSITORY = "poolside/Laguna-XS-2.1-DFlash-INT4"
 DRAFTER_REVISION = "630267be6a2ad870ca80fc3930bde87d6ad7bb24"
 PROVIDER_PATH = Path("specforge/algorithms/dflash/providers.py")
 MODEL_PATH = Path("specforge/modeling/draft/dflash.py")
+PORT_PATCH_PATH = Path("patches/specforge/e6440f09/laguna-dflash-training.patch")
 
 
 class TrainingModelCompatibilityResult(StrictModel):
@@ -37,6 +47,21 @@ class TrainingModelCompatibilityResult(StrictModel):
     trainer_config_class: str
     compatible: bool
     reasons: tuple[str, ...]
+
+
+class TrainingModelPortProbeResult(StrictModel):
+    upstream: TrainingModelCompatibilityResult
+    ported_patch: PatchApplicationResult
+    checkpoint_header: CheckpointHeaderResult
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def ready_for_physical_probe(self) -> bool:
+        return (
+            not self.upstream.compatible
+            and self.ported_patch.applies_cleanly
+            and self.checkpoint_header.passed
+        )
 
 
 def inspect_training_model_compatibility(
@@ -113,6 +138,44 @@ def run_training_model_probe(
             specforge_revision=_revision(specforge),
             specforge_main_revision=_remote_main_revision(),
         )
+
+
+def run_training_model_port_probe(
+    aurorapp_repository: Path,
+) -> TrainingModelPortProbeResult:
+    upstream = run_training_model_probe(aurorapp_repository)
+    config_path = Path(
+        hf_hub_download(
+            DRAFTER_REPOSITORY,
+            "config.json",
+            revision=DRAFTER_REVISION,
+        )
+    )
+    weights_path = Path(
+        hf_hub_download(
+            DRAFTER_REPOSITORY,
+            "model.safetensors",
+            revision=DRAFTER_REVISION,
+        )
+    )
+    config = LagunaDFlashConfigContract.model_validate_json(config_path.read_text(encoding="utf-8"))
+    checkpoint_header = validate_checkpoint_header(
+        config,
+        read_safetensors_header(weights_path),
+    )
+    with tempfile.TemporaryDirectory(prefix="aurorapp-training-port-probe-") as temporary:
+        specforge = Path(temporary) / "specforge"
+        _clone_exact(SPECFORGE_REPOSITORY, SPECFORGE_REVISION, specforge)
+        ported_patch = check_patch_application(
+            specforge,
+            SPECFORGE_REVISION,
+            aurorapp_repository / PORT_PATCH_PATH,
+        )
+    return TrainingModelPortProbeResult(
+        upstream=upstream,
+        ported_patch=ported_patch,
+        checkpoint_header=checkpoint_header,
+    )
 
 
 def _remote_main_revision() -> str:

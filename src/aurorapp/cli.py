@@ -34,7 +34,7 @@ from aurorapp.models import (
 from aurorapp.schema import write_schemas
 from aurorapp.signatures import ApprovalSigner
 from aurorapp.source_probe import run_capture_patch_probe
-from aurorapp.training_probe import run_training_model_probe
+from aurorapp.training_probe import run_training_model_port_probe
 
 app = typer.Typer(no_args_is_help=True, help="Aurora++ control and audit CLI.")
 config_app = typer.Typer(no_args_is_help=True)
@@ -174,10 +174,10 @@ def probe_source_compatibility(
         staged,
         loader=lambda path: bool(json.loads(path.read_text(encoding="utf-8"))),
     )
-    training_model_result = run_training_model_probe(Path.cwd())
+    training_model_port = run_training_model_port_probe(Path.cwd())
     training_model_staged = artifact_store.stage_bytes(
         "training-model-compatibility.json",
-        training_model_result.model_dump_json(indent=2).encode() + b"\n",
+        training_model_port.model_dump_json(indent=2).encode() + b"\n",
         producer="compatibility-training-model-probe",
     )
     training_model_artifact = artifact_store.commit(
@@ -201,7 +201,8 @@ def probe_source_compatibility(
         capture,
         ingest,
         training_model=training_model_artifact,
-        training_model_compatible=training_model_result.compatible,
+        training_model_compatible=training_model_port.upstream.compatible,
+        training_model_port_ready=training_model_port.ready_for_physical_probe,
     )
     report = CompatibilityReport(
         identity_kind="draft",
@@ -231,7 +232,8 @@ def probe_source_compatibility(
                 result.upstream_incompatibility_verified
             ),
             "ported_patch_applies": result.ported_patch.applies_cleanly,
-            "training_model_compatible": training_model_result.compatible,
+            "training_model_compatible": training_model_port.upstream.compatible,
+            "training_model_port_ready": training_model_port.ready_for_physical_probe,
             "report_hash": report_hash,
             "status": "blocked",
         }
@@ -248,6 +250,7 @@ def _build_source_compatibility_steps(
     *,
     training_model: ArtifactRef | None = None,
     training_model_compatible: bool | None = None,
+    training_model_port_ready: bool = False,
 ) -> tuple[CompatibilityStepResult, ...]:
     steps: list[CompatibilityStepResult] = []
     for name in COMPATIBILITY_LADDER:
@@ -287,17 +290,19 @@ def _build_source_compatibility_steps(
                 "SpecForge materialized exact DFlash tensors, drained the release "
                 "queue, bounded helper shutdown, and cleaned all resources"
             )
-        elif (
-            name == "bounded-optimizer-step"
-            and training_model is not None
-            and training_model_compatible is False
-        ):
-            status = CompatibilityStatus.FAILED
+        elif name == "bounded-optimizer-step" and training_model is not None:
             evidence = (training_model,)
-            detail = (
-                "official Laguna DFlash uses DFlashLagunaForCausalLM, while pinned "
-                "SpecForge registers only its Qwen3-specific DFlashDraftModel"
-            )
+            if training_model_compatible is False and training_model_port_ready:
+                detail = (
+                    "the exact Laguna port applies and accounts for all checkpoint "
+                    "tensors; physical model load and optimizer step have not run"
+                )
+            elif training_model_compatible is False:
+                status = CompatibilityStatus.FAILED
+                detail = (
+                    "official Laguna DFlash uses DFlashLagunaForCausalLM, while "
+                    "pinned SpecForge registers only its Qwen3-specific DFlashDraftModel"
+                )
         steps.append(
             CompatibilityStepResult(
                 name=name,
