@@ -91,6 +91,7 @@ def test_training_wrapper_does_not_cast_nonpersistent_model_buffers() -> None:
 
     assert 'loss_type="dflash",\n    ).to(device="cuda")' in source
     assert 'loss_type="dflash",\n    ).to(device="cuda", dtype=torch.bfloat16)' not in source
+    assert 'shutil.copyfile(source_config_path, staging / "config.json")' in source
 
 
 def test_runtime_config_ignores_load_path_but_keeps_execution_fields() -> None:
@@ -244,6 +245,7 @@ def test_captured_batch_optimizer_requires_reload_and_complete_checkpoint() -> N
             "random_state": "c" * 64,
             "manifest": "d" * 64,
         },
+        "source_config_hash": "e" * 64,
         "checkpoint_path": "/checkpoints/objects/dd/candidate",
         "pre_save_state_digest": "f" * 64,
         "training_cursor": 1,
@@ -279,6 +281,10 @@ def test_captured_batch_optimizer_requires_reload_and_complete_checkpoint() -> N
     payload["checkpoint_hashes"].pop("random_state")
     assert CapturedBatchOptimizerResult.model_validate(payload).passed is False
 
+    payload["checkpoint_hashes"]["random_state"] = "c" * 64
+    payload["source_config_hash"] = "0" * 64
+    assert CapturedBatchOptimizerResult.model_validate(payload).passed is False
+
 
 def test_captured_batch_optimizer_requires_checkpoint_path_at_construction() -> None:
     with pytest.raises(ValueError, match="checkpoint_path"):
@@ -296,6 +302,7 @@ def test_captured_batch_optimizer_requires_checkpoint_path_at_construction() -> 
                 "changed_parameter": "draft_model.layers.0.self_attn.g_proj.weight",
                 "parameter_delta": 0.0,
                 "checkpoint_hashes": {},
+                "source_config_hash": "e" * 64,
                 "pre_save_state_digest": "f" * 64,
                 "training_cursor": 1,
                 "reload": {
@@ -409,6 +416,7 @@ def test_probe_wire_record_excludes_nested_computed_fields() -> None:
                 "random_state": "4" * 64,
                 "manifest": "5" * 64,
             },
+            "source_config_hash": "1" * 64,
             "checkpoint_path": "/checkpoints/candidate",
             "pre_save_state_digest": "6" * 64,
             "training_cursor": 1,

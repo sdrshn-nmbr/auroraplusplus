@@ -173,6 +173,7 @@ class CapturedBatchOptimizerResult(StrictModel):
     changed_parameter: Literal["draft_model.layers.0.self_attn.g_proj.weight"]
     parameter_delta: float = Field(ge=0)
     checkpoint_hashes: dict[str, Sha256]
+    source_config_hash: Sha256
     checkpoint_path: str = Field(min_length=1)
     pre_save_state_digest: Sha256
     training_cursor: Literal[1]
@@ -211,6 +212,7 @@ class CapturedBatchOptimizerResult(StrictModel):
             and math.isfinite(self.parameter_delta)
             and self.parameter_delta > 0
             and required_checkpoint_files == set(self.checkpoint_hashes)
+            and self.checkpoint_hashes["config"] == self.source_config_hash
             and self.reload.reference_state_digest == self.pre_save_state_digest
             and self.reload.passed
             and self.released

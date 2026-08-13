@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import random
+import shutil
 import subprocess
 import sys
 import uuid
@@ -325,14 +326,16 @@ def capture_batch(base_url: str, store: MooncakeFeatureStore):
 
 
 def build_training_model(args: argparse.Namespace):
-    draft_config = AutoConfig.from_pretrained(
-        args.draft_repository,
+    draft_path = snapshot_download(
+        repo_id=args.draft_repository,
         revision=args.draft_revision,
+    )
+    draft_config = AutoConfig.from_pretrained(
+        draft_path,
     )
     draft_config._attn_implementation = "eager"
     draft_model, loading = AutoDraftModel.from_pretrained(
-        args.draft_repository,
-        revision=args.draft_revision,
+        draft_path,
         config=draft_config,
         dtype=torch.bfloat16,
         output_loading_info=True,
@@ -360,7 +363,7 @@ def build_training_model(args: argparse.Namespace):
         objective_chunk_blocks=1,
         loss_type="dflash",
     ).to(device="cuda")
-    return training_model
+    return training_model, Path(draft_path) / "config.json"
 
 
 def write_checkpoint(
@@ -368,10 +371,13 @@ def write_checkpoint(
     model: OnlineDFlashModel,
     optimizer: torch.optim.Optimizer,
     sample_id: str,
-) -> tuple[Path, dict[str, str]]:
+    source_config_path: Path,
+) -> tuple[Path, dict[str, str], str]:
     staging = root / ".staging" / str(uuid.uuid4())
     staging.mkdir(parents=True)
     model.draft_model.save_pretrained(staging, safe_serialization=True)
+    source_config_hash = file_hash(source_config_path)
+    shutil.copyfile(source_config_path, staging / "config.json")
     optimizer_path = staging / "optimizer.pt"
     random_path = staging / "random-state.pt"
     torch.save(optimizer.state_dict(), optimizer_path)
@@ -406,7 +412,7 @@ def write_checkpoint(
     if final.exists():
         raise RuntimeError(f"checkpoint object already exists: {final}")
     staging.replace(final)
-    return final, hashes
+    return final, hashes, source_config_hash
 
 
 def parse_reload_result(output: str) -> CheckpointReloadResult:
@@ -428,7 +434,7 @@ def train(args: argparse.Namespace) -> None:
     release_drain: dict[str, object] | None = None
     try:
         ref, handle, batch = capture_batch(args.base_url, store)
-        training_model = build_training_model(args)
+        training_model, source_config_path = build_training_model(args)
         strategy = DFlashTrainStrategy(training_model)
         training_model.train()
         trainable = [
@@ -467,11 +473,12 @@ def train(args: argparse.Namespace) -> None:
             },
             reference_path,
         )
-        checkpoint, checkpoint_hashes = write_checkpoint(
+        checkpoint, checkpoint_hashes, source_config_hash = write_checkpoint(
             args.checkpoint_root,
             training_model,
             optimizer,
             ref.sample_id,
+            source_config_path,
         )
         loss = float(step.loss.detach().item())
         accuracy = float(step.metrics["accuracy"].detach().item())
@@ -519,6 +526,7 @@ def train(args: argparse.Namespace) -> None:
             changed_parameter=CHANGED_PARAMETER,
             parameter_delta=delta,
             checkpoint_hashes=checkpoint_hashes,
+            source_config_hash=source_config_hash,
             checkpoint_path=str(checkpoint),
             pre_save_state_digest=reference_state_digest,
             training_cursor=1,
