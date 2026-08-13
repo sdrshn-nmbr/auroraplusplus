@@ -341,6 +341,7 @@ def train(args: argparse.Namespace) -> None:
             changed_parameter=CHANGED_PARAMETER,
             parameter_delta=delta,
             checkpoint_hashes=checkpoint_hashes,
+            checkpoint_path=str(checkpoint),
             training_cursor=1,
             reload_missing=reload_result.missing,
             reload_unexpected=reload_result.unexpected,
@@ -350,9 +351,11 @@ def train(args: argparse.Namespace) -> None:
         )
         if not result.passed or not math.isfinite(result.loss):
             raise RuntimeError(result.model_dump_json())
-        payload = result.model_dump(mode="json", exclude={"passed"})
-        payload["checkpoint_path"] = str(checkpoint)
-        print("AURORAPP_RESULT=" + json.dumps(payload, sort_keys=True), flush=True)
+        print(
+            "AURORAPP_RESULT="
+            + result.model_dump_json(exclude={"passed"}),
+            flush=True,
+        )
     finally:
         if handle is not None:
             store.release(handle, reason="captured-optimizer-finally")

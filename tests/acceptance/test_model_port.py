@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from aurorapp.model_port import (
     CapturedBatchOptimizerResult,
     LagunaDFlashConfigContract,
@@ -138,3 +140,29 @@ def test_captured_batch_optimizer_requires_reload_and_complete_checkpoint() -> N
     assert result.passed is True
     payload["checkpoint_hashes"].pop("random_state")
     assert CapturedBatchOptimizerResult.model_validate(payload).passed is False
+
+
+def test_captured_batch_optimizer_requires_checkpoint_path_at_construction() -> None:
+    with pytest.raises(ValueError, match="checkpoint_path"):
+        CapturedBatchOptimizerResult.model_validate(
+            {
+                "sample_id": "sample",
+                "input_ids_shape": [1, 4],
+                "loss_mask_shape": [1, 4],
+                "hidden_states_shape": [1, 4, 10240],
+                "loss": 1.0,
+                "accuracy": 0.0,
+                "accuracy_denom": 1,
+                "gradient_parameters": [],
+                "optimizer_state_entries": 0,
+                "changed_parameter": "draft_model.layers.0.self_attn.g_proj.weight",
+                "parameter_delta": 0.0,
+                "checkpoint_hashes": {},
+                "training_cursor": 1,
+                "reload_missing": [],
+                "reload_unexpected": [],
+                "reload_output_equal": False,
+                "released": True,
+                "release_pending": 0,
+            }
+        )
