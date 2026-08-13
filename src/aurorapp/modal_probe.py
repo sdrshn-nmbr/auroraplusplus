@@ -21,6 +21,7 @@ from aurorapp.model_port import (
     CapturedBatchOptimizerResult,
     CheckpointReferenceResult,
     CheckpointReloadResult,
+    ParentDrafterRestoreResult,
     PhysicalModelPortResult,
 )
 from aurorapp.models import ArtifactRef
@@ -963,6 +964,73 @@ def _candidate_serving_result(
     )
 
 
+def _speculative_telemetry(response: dict[str, Any]) -> dict[str, Any]:
+    meta = response["meta_info"]
+    return {
+        "proposed_drafts": meta.get(
+            "spec_proposed_drafts", meta.get("spec_num_proposed_drafts", 0)
+        ),
+        "accepted_drafts": meta.get(
+            "spec_accepted_drafts", meta.get("spec_num_correct_drafts", 0)
+        ),
+        "verify_count": meta.get("spec_verify_ct", 0),
+        "accept_histogram": meta.get("spec_accept_histogram", []),
+    }
+
+
+def _parent_restore_probe(
+    repository_revision: str,
+    candidate_serving_evidence_hash: str,
+    candidate_manifest_hash: str,
+    request_hash: str,
+    expected_output_ids: list[int],
+    expected_text: str,
+    expected_finish_reason: dict[str, Any],
+) -> dict[str, Any]:
+    parent = _server_probe(speculative=True, repository_revision=repository_revision)
+    try:
+        generation = parent["generation"]
+        request = generation["request"]
+        response = generation["response_body"]
+        if canonical_sha256(request) != request_hash:
+            raise ValueError("parent restore request differs from candidate serving request")
+        result = ParentDrafterRestoreResult.model_validate(
+            {
+                "candidate_serving_evidence_hash": candidate_serving_evidence_hash,
+                "candidate_manifest_hash": candidate_manifest_hash,
+                "parent_draft_repository": DRAFT_REPOSITORY,
+                "parent_draft_revision": DRAFT_REVISION,
+                "request_hash": request_hash,
+                "expected_output_ids": expected_output_ids,
+                "parent_output_ids": response["output_ids"],
+                "expected_text": expected_text,
+                "parent_text": response["text"],
+                "expected_finish_reason": expected_finish_reason,
+                "parent_finish_reason": response["meta_info"]["finish_reason"],
+                "speculative_telemetry": _speculative_telemetry(response),
+                "server_healthy": parent["server_healthy"],
+                "cleanup_passed": parent["cleanup_passed"],
+            }
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        return {
+            "status": "failed",
+            "hardware": _hardware_identity(),
+            "runtime": _runtime_identity(repository_revision),
+            "parent": parent,
+            "cleanup_passed": parent.get("cleanup_passed") is True,
+            "error": {"type": type(error).__name__, "message": str(error)},
+        }
+    return {
+        "status": "passed" if result.passed else "failed",
+        "hardware": _hardware_identity(),
+        "runtime": _runtime_identity(repository_revision),
+        "result": result.model_dump(mode="json"),
+        "parent": parent,
+        "cleanup_passed": parent["cleanup_passed"],
+    }
+
+
 def _candidate_speculative_serving_probe(
     repository_revision: str,
     checkpoint_path: str,
@@ -1018,6 +1086,9 @@ def _candidate_speculative_serving_probe(
         "result": result.model_dump(mode="json"),
         "target_arm": target_arm,
         "candidate_arm": candidate_arm,
+        "cleanup_passed": (
+            target_arm["cleanup_passed"] and candidate_arm["cleanup_passed"]
+        ),
     }
 
 
@@ -1190,6 +1261,35 @@ def candidate_dflash_serving_probe(
     volumes={"/root/.cache/huggingface": model_cache},
     single_use_containers=True,
     restrict_modal_access=True,
+    name="parent-dflash-restore-probe",
+)
+def parent_dflash_restore_probe(
+    repository_revision: str,
+    candidate_serving_evidence_hash: str,
+    candidate_manifest_hash: str,
+    request_hash: str,
+    expected_output_ids: list[int],
+    expected_text: str,
+    expected_finish_reason: dict[str, Any],
+) -> dict[str, Any]:
+    return _parent_restore_probe(
+        repository_revision,
+        candidate_serving_evidence_hash,
+        candidate_manifest_hash,
+        request_hash,
+        expected_output_ids,
+        expected_text,
+        expected_finish_reason,
+    )
+
+
+@app.function(
+    image=sglang_image,
+    gpu="H100!",
+    timeout=1800,
+    volumes={"/root/.cache/huggingface": model_cache},
+    single_use_containers=True,
+    restrict_modal_access=True,
     name="laguna-dflash-capture-probe",
 )
 def laguna_dflash_capture_probe(repository_revision: str) -> dict[str, Any]:
@@ -1284,6 +1384,7 @@ def main(
     checkpoint_path: str = "",
     checkpoint_manifest_hash: str = "",
     checkpoint_weights_hash: str = "",
+    candidate_serving_evidence: str = "",
 ) -> None:
     revision = _local_repository_revision(allow_dirty)
     try:
@@ -1321,10 +1422,32 @@ def main(
                 checkpoint_manifest_hash,
                 checkpoint_weights_hash,
             )
+        elif probe == "parent-restore":
+            if not candidate_serving_evidence:
+                raise ValueError("parent-restore requires --candidate-serving-evidence")
+            candidate_record = json.loads(
+                Path(candidate_serving_evidence).read_text(encoding="utf-8")
+            )
+            candidate = CandidateSpeculativeServingResult.model_validate(
+                candidate_record["result"]["result"]
+            )
+            if candidate_record.get("status") != "passed" or not candidate.passed:
+                raise ValueError("parent-restore requires passing candidate evidence")
+            artifact = ArtifactRef.model_validate(candidate_record["artifact"])
+            result = parent_dflash_restore_probe.remote(
+                revision,
+                artifact.content_hash,
+                candidate.candidate_manifest_hash,
+                candidate.request_hash,
+                list(candidate.candidate_output_ids),
+                candidate.candidate_text,
+                candidate.candidate_finish_reason.model_dump(mode="json"),
+            )
         else:
             raise ValueError(
                 "probe must be identity, target, dflash, capture, ingest, "
-                "model-port, captured-optimizer, reload-diagnostic, or candidate-serving"
+                "model-port, captured-optimizer, reload-diagnostic, candidate-serving, "
+                "or parent-restore"
             )
         remote_status = result.get("status") if isinstance(result, dict) else None
         record: dict[str, Any] = {
@@ -1342,6 +1465,7 @@ def main(
                         "captured-optimizer",
                         "reload-diagnostic",
                         "candidate-serving",
+                        "parent-restore",
                     }
                     else sglang_image.object_id
                 )

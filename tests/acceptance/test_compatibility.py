@@ -151,6 +151,36 @@ def test_capture_artifact_requires_probe_result_and_cleanup_to_pass(tmp_path: Pa
     assert _passing_probe_artifact(path, "capture") is None
 
 
+def test_candidate_serving_accepts_both_arm_cleanup_from_older_probe_record(
+    tmp_path: Path,
+) -> None:
+    item = ArtifactRef(
+        content_hash="a" * 64,
+        producer="probe",
+        size=1,
+        storage_path="objects/a",
+        validation_result="valid",
+    )
+    path = tmp_path / "candidate-serving.json"
+    path.write_text(
+        json.dumps(
+            {
+                "probe": "candidate-serving",
+                "status": "passed",
+                "result": {
+                    "status": "passed",
+                    "target_arm": {"cleanup_passed": True},
+                    "candidate_arm": {"cleanup_passed": True},
+                },
+                "artifact": item.model_dump(mode="json"),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert _passing_probe_artifact(path, "candidate-serving") == item
+
+
 def test_source_report_binds_passing_specforge_ingest_evidence() -> None:
     items = [
         ArtifactRef(
@@ -160,13 +190,14 @@ def test_source_report_binds_passing_specforge_ingest_evidence() -> None:
             storage_path=f"objects/{index}",
             validation_result="valid",
         )
-        for index in range(1, 7)
+        for index in range(1, 8)
     ]
 
     steps = _build_source_compatibility_steps(
         *items[:5],
         training_model=items[5],
         captured_optimizer=items[5],
+        candidate_serving=items[6],
         training_model_compatible=False,
         training_model_port_ready=True,
     )
@@ -187,3 +218,7 @@ def test_source_report_binds_passing_specforge_ingest_evidence() -> None:
         step = steps[COMPATIBILITY_LADDER.index(name)]
         assert step.status is CompatibilityStatus.PASSED
         assert step.evidence == (items[5],)
+    serving = steps[COMPATIBILITY_LADDER.index("candidate-speculative-serving")]
+    assert serving.status is CompatibilityStatus.PASSED
+    assert serving.evidence_level is EvidenceLevel.PHYSICAL_GPU
+    assert serving.evidence == (items[6],)

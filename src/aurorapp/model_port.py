@@ -73,6 +73,35 @@ class CandidateSpeculativeServingResult(StrictModel):
         )
 
 
+class ParentDrafterRestoreResult(StrictModel):
+    candidate_serving_evidence_hash: Sha256
+    candidate_manifest_hash: Sha256
+    parent_draft_repository: str = Field(min_length=1)
+    parent_draft_revision: GitRevision
+    request_hash: Sha256
+    expected_output_ids: tuple[int, ...] = Field(min_length=1)
+    parent_output_ids: tuple[int, ...] = Field(min_length=1)
+    expected_text: str
+    parent_text: str
+    expected_finish_reason: GenerationFinishReason
+    parent_finish_reason: GenerationFinishReason
+    speculative_telemetry: SpeculativeTelemetry
+    server_healthy: bool
+    cleanup_passed: bool
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def passed(self) -> bool:
+        return (
+            self.server_healthy
+            and self.cleanup_passed
+            and self.expected_output_ids == self.parent_output_ids
+            and self.expected_text == self.parent_text
+            and self.expected_finish_reason == self.parent_finish_reason
+            and self.speculative_telemetry.passed
+        )
+
+
 class LagunaDFlashMethodContract(StrictModel):
     block_size: int = Field(ge=2)
     mask_token_id: int = Field(ge=0)

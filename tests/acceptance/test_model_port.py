@@ -10,6 +10,7 @@ from aurorapp.model_port import (
     DraftExecutionState,
     DraftProbeInputHashes,
     LagunaDFlashConfigContract,
+    ParentDrafterRestoreResult,
     PhysicalModelPortResult,
     checkpoint_contract,
     draft_runtime_config,
@@ -82,6 +83,35 @@ def test_candidate_serving_requires_lossless_output_and_real_dflash_work() -> No
         }
     )
     assert no_draft_work.passed is False
+
+
+def test_parent_restore_requires_original_output_and_real_dflash_work() -> None:
+    result = ParentDrafterRestoreResult.model_validate(
+        {
+            "candidate_serving_evidence_hash": "1" * 64,
+            "candidate_manifest_hash": "2" * 64,
+            "parent_draft_repository": "poolside/Laguna-XS-2.1-DFlash-INT4",
+            "parent_draft_revision": "3" * 40,
+            "request_hash": "4" * 64,
+            "expected_output_ids": [1, 2],
+            "parent_output_ids": [1, 2],
+            "expected_text": "answer",
+            "parent_text": "answer",
+            "expected_finish_reason": {"type": "length", "length": 2},
+            "parent_finish_reason": {"type": "length", "length": 2},
+            "speculative_telemetry": {
+                "proposed_drafts": 16,
+                "accepted_drafts": 2,
+                "verify_count": 2,
+                "accept_histogram": [1, 1],
+            },
+            "server_healthy": True,
+            "cleanup_passed": True,
+        }
+    )
+
+    assert result.passed is True
+    assert result.model_copy(update={"parent_output_ids": (9, 9)}).passed is False
 
 
 def test_training_wrapper_does_not_cast_nonpersistent_model_buffers() -> None:

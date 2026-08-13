@@ -195,8 +195,12 @@ def probe_source_compatibility(
         "ingest",
     )
     captured_optimizer = _passing_probe_artifact(
-        evidence_directory / "specforge-laguna-captured-optimizer.json",
+        evidence_directory / "specforge-laguna-captured-optimizer-config-preserved.json",
         "captured-optimizer",
+    )
+    candidate_serving = _passing_probe_artifact(
+        evidence_directory / "candidate-dflash-serving-config-preserved.json",
+        "candidate-serving",
     )
     steps = _build_source_compatibility_steps(
         source_artifact,
@@ -206,6 +210,7 @@ def probe_source_compatibility(
         ingest,
         training_model=training_model_artifact,
         captured_optimizer=captured_optimizer,
+        candidate_serving=candidate_serving,
         training_model_compatible=training_model_port.upstream.compatible,
         training_model_port_ready=training_model_port.ready_for_physical_probe,
     )
@@ -225,6 +230,7 @@ def probe_source_compatibility(
         (capture, "target-hidden-state-capture"),
         (ingest, "specforge-batch-ingest"),
         (captured_optimizer, "captured-optimizer"),
+        (candidate_serving, "candidate-speculative-serving"),
         (training_model_artifact, "training-model-compatibility"),
     )
     for item, kind in probe_artifacts:
@@ -254,6 +260,7 @@ def _build_source_compatibility_steps(
     *,
     training_model: ArtifactRef | None = None,
     captured_optimizer: ArtifactRef | None = None,
+    candidate_serving: ArtifactRef | None = None,
     training_model_compatible: bool | None = None,
     training_model_port_ready: bool = False,
 ) -> tuple[CompatibilityStepResult, ...]:
@@ -327,6 +334,15 @@ def _build_source_compatibility_steps(
                 ),
             }
             detail = details[name]
+        elif name == "candidate-speculative-serving" and candidate_serving is not None:
+            status = CompatibilityStatus.PASSED
+            evidence = (candidate_serving,)
+            evidence_level = EvidenceLevel.PHYSICAL_GPU
+            detail = (
+                "trained checkpoint loaded in SGLang, performed nonzero DFlash "
+                "proposal and verification work, preserved one greedy target output, "
+                "and cleaned both server arms"
+            )
         elif name == "bounded-optimizer-step" and training_model is not None:
             evidence = (training_model,)
             if training_model_compatible is False and training_model_port_ready:
@@ -365,12 +381,22 @@ def _passing_probe_artifact(path: Path, expected_probe: str) -> ArtifactRef | No
         return None
     payload = json.loads(path.read_text(encoding="utf-8"))
     result = payload.get("result")
+    cleanup_passed = isinstance(result, dict) and (
+        result.get("cleanup_passed") is True
+        or (
+            expected_probe == "candidate-serving"
+            and isinstance(result.get("target_arm"), dict)
+            and result["target_arm"].get("cleanup_passed") is True
+            and isinstance(result.get("candidate_arm"), dict)
+            and result["candidate_arm"].get("cleanup_passed") is True
+        )
+    )
     if (
         payload.get("probe") != expected_probe
         or payload.get("status") != "passed"
         or not isinstance(result, dict)
         or result.get("status") != "passed"
-        or result.get("cleanup_passed") is not True
+        or not cleanup_passed
     ):
         return None
     artifact = payload.get("artifact")
