@@ -1248,6 +1248,15 @@ def _target_sampling_determinism_probe(
         speculative_draft_path=None,
         moe_runner_backend=backend_override,
     )
+    if target_arm.get("passed") is not True:
+        return {
+            "status": "failed",
+            "hardware": _hardware_identity(),
+            "runtime": _runtime_identity(repository_revision),
+            "target_arm": target_arm,
+            "error": target_arm.get("error")
+            or {"type": "TargetArmFailure", "message": "target serving arm failed"},
+        }
     try:
         cases = tuple(
             SampledSeedRepeatability(

@@ -16,6 +16,7 @@ from aurorapp.modal_probe import (
     _specforge_ingest_after_prewarm,
     _start_logged_process,
     _stop_process_group,
+    _target_sampling_determinism_probe,
     validate_dflash_capture_result,
     validate_specforge_ingest_result,
 )
@@ -116,6 +117,24 @@ def test_sampled_probe_binds_deterministic_runtime(monkeypatch, moe_runner_backe
     else:
         index = commands[0].index("--moe-runner-backend")
         assert commands[0][index + 1] == moe_runner_backend
+
+
+def test_target_determinism_probe_preserves_primary_server_failure(monkeypatch) -> None:
+    arm = {
+        "passed": False,
+        "server_healthy": False,
+        "generations": {},
+        "error": {"type": "AssertionError", "message": "Hidden size mismatch"},
+        "cleanup_passed": True,
+    }
+    monkeypatch.setattr("aurorapp.modal_probe._sampled_serving_arm", lambda **_: arm)
+    monkeypatch.setattr("aurorapp.modal_probe._hardware_identity", lambda: {})
+    monkeypatch.setattr("aurorapp.modal_probe._runtime_identity", lambda _: {})
+
+    result = _target_sampling_determinism_probe("a" * 40, "triton")
+
+    assert result["status"] == "failed"
+    assert result["error"] == arm["error"]
 
 
 def test_dflash_capture_contract_requires_all_official_laguna_layers() -> None:
