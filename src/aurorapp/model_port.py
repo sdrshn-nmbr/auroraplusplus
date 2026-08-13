@@ -1,9 +1,10 @@
 import json
+import math
 import struct
 from pathlib import Path
 from typing import Literal
 
-from pydantic import ConfigDict, Field, model_validator
+from pydantic import ConfigDict, Field, computed_field, model_validator
 
 from aurorapp.models import StrictModel
 
@@ -57,6 +58,42 @@ class CheckpointHeaderResult(StrictModel):
     missing: tuple[str, ...]
     unexpected: tuple[str, ...]
     shape_or_dtype_mismatches: tuple[str, ...]
+
+
+class PhysicalModelPortResult(StrictModel):
+    architecture: Literal["DFlashLagunaForCausalLM"]
+    checkpoint: CheckpointHeaderResult
+    loading_missing: tuple[str, ...]
+    loading_unexpected: tuple[str, ...]
+    loading_mismatched: tuple[str, ...]
+    forward_shape: tuple[int, int, int]
+    loss_finite: bool
+    gradient_parameters: tuple[str, ...]
+    optimizer_state_entries: int = Field(ge=0)
+    changed_parameter: Literal["layers.0.self_attn.g_proj.weight"]
+    parameter_delta: float = Field(ge=0)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def passed(self) -> bool:
+        required_gradients = {
+            "layers.0.self_attn.qkv_proj.weight",
+            "layers.0.self_attn.g_proj.weight",
+            "fc.weight",
+            "aux_hidden_norms.0.weight",
+        }
+        return (
+            self.checkpoint.passed
+            and not self.loading_missing
+            and not self.loading_unexpected
+            and not self.loading_mismatched
+            and self.forward_shape == (1, 4, 2048)
+            and self.loss_finite
+            and required_gradients.issubset(self.gradient_parameters)
+            and self.optimizer_state_entries > 0
+            and math.isfinite(self.parameter_delta)
+            and self.parameter_delta > 0
+        )
 
 
 def checkpoint_contract(

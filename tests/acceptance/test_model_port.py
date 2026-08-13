@@ -2,6 +2,7 @@ import json
 
 from aurorapp.model_port import (
     LagunaDFlashConfigContract,
+    PhysicalModelPortResult,
     checkpoint_contract,
     validate_checkpoint_header,
 )
@@ -58,3 +59,40 @@ def test_checkpoint_header_rejects_one_dropped_laguna_gate() -> None:
     assert result.missing == ("layers.3.self_attn.g_proj.weight",)
     assert result.unexpected == ()
     assert result.shape_or_dtype_mismatches == ()
+
+
+def test_physical_port_result_requires_every_laguna_gradient_surface() -> None:
+    result = PhysicalModelPortResult.model_validate(
+        {
+            "architecture": "DFlashLagunaForCausalLM",
+            "checkpoint": {
+                "passed": True,
+                "expected_count": 58,
+                "observed_count": 58,
+                "missing": [],
+                "unexpected": [],
+                "shape_or_dtype_mismatches": [],
+            },
+            "loading_missing": [],
+            "loading_unexpected": [],
+            "loading_mismatched": [],
+            "forward_shape": [1, 4, 2048],
+            "loss_finite": True,
+            "gradient_parameters": [
+                "layers.0.self_attn.qkv_proj.weight",
+                "layers.0.self_attn.g_proj.weight",
+                "fc.weight",
+                "aux_hidden_norms.0.weight",
+            ],
+            "optimizer_state_entries": 58,
+            "changed_parameter": "layers.0.self_attn.g_proj.weight",
+            "parameter_delta": 1.0,
+        }
+    )
+
+    assert result.passed is True
+
+    payload = result.model_dump(mode="json", exclude={"passed"})
+    payload["gradient_parameters"].remove("aux_hidden_norms.0.weight")
+    invalid = PhysicalModelPortResult.model_validate(payload)
+    assert invalid.passed is False

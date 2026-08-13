@@ -16,6 +16,7 @@ import modal
 
 from aurorapp.artifacts import ContentAddressedArtifactStore
 from aurorapp.canonical import canonical_bytes
+from aurorapp.model_port import PhysicalModelPortResult
 from aurorapp.models import ArtifactRef
 from aurorapp.sglang_contract import SGLANG_SERVER_RANDOM_SEED, greedy_generation_request
 
@@ -81,10 +82,22 @@ specforge_image = (
         "/opt/aurorapp/specforge_ingest_probe.py",
         copy=True,
     )
+    .add_local_file(
+        "scripts/specforge_model_port_probe.py",
+        "/opt/aurorapp/specforge_model_port_probe.py",
+        copy=True,
+    )
+    .add_local_file(
+        "patches/specforge/e6440f09/laguna-dflash-training.patch",
+        "/opt/aurorapp/laguna-dflash-training.patch",
+        copy=True,
+    )
     .run_commands(
         "git clone --filter=blob:none https://github.com/sgl-project/SpecForge.git /opt/specforge",
         f"git -C /opt/specforge checkout {SPECFORGE_REVISION}",
         f'test "$(git -C /opt/specforge rev-parse HEAD)" = {SPECFORGE_REVISION}',
+        "git -C /opt/specforge apply --check /opt/aurorapp/laguna-dflash-training.patch",
+        "git -C /opt/specforge apply /opt/aurorapp/laguna-dflash-training.patch",
         "uv pip install --system --no-deps -e /opt/specforge",
         (
             'python -c "from specforge.inference.adapters.server_capture import '
@@ -425,6 +438,45 @@ def _specforge_ingest_after_prewarm(port: int) -> dict[str, Any]:
         }
     ingest = _specforge_ingest(port)
     return {**ingest, "prewarm": prewarm}
+
+
+def _model_port_optimizer() -> dict[str, Any]:
+    command = [
+        "python",
+        "/opt/aurorapp/specforge_model_port_probe.py",
+        "--repository",
+        DRAFT_REPOSITORY,
+        "--revision",
+        DRAFT_REVISION,
+    ]
+    execution = _run_until_terminal_record(
+        command,
+        marker="AURORAPP_RESULT=",
+        timeout=900,
+    )
+    records = execution["terminal_records"]
+    if execution["timed_out"] or len(records) != 1:
+        return {
+            "passed": False,
+            "command": command,
+            "execution": execution,
+            "error": "model port probe did not return one terminal record",
+        }
+    try:
+        result = PhysicalModelPortResult.model_validate_json(records[0])
+    except (ValueError, TypeError) as error:
+        return {
+            "passed": False,
+            "command": command,
+            "execution": execution,
+            "error": str(error),
+        }
+    return {
+        "passed": result.passed,
+        "command": command,
+        "execution": execution,
+        "result": result.model_dump(mode="json"),
+    }
 
 
 def _port_is_closed(port: int) -> bool:
@@ -787,6 +839,29 @@ def specforge_batch_ingest_probe(repository_revision: str) -> dict[str, Any]:
     return _capture_server_probe(repository_revision, specforge_ingest=True)
 
 
+@app.function(
+    image=specforge_image,
+    gpu="H100!",
+    timeout=1800,
+    volumes={"/root/.cache/huggingface": model_cache},
+    single_use_containers=True,
+    restrict_modal_access=True,
+    name="specforge-laguna-model-port-probe",
+)
+def specforge_laguna_model_port_probe(repository_revision: str) -> dict[str, Any]:
+    optimizer = _model_port_optimizer()
+    gpu_processes = _gpu_processes()
+    passed = optimizer.get("passed") is True and not gpu_processes
+    return {
+        "status": "passed" if passed else "failed",
+        "hardware": _hardware_identity(),
+        "runtime": _runtime_identity(repository_revision),
+        "optimizer": optimizer,
+        "cleanup": {"gpu_processes": gpu_processes},
+        "cleanup_passed": not gpu_processes,
+    }
+
+
 @app.local_entrypoint()
 def main(probe: str = "identity", output: str = "", allow_dirty: bool = False) -> None:
     revision = _local_repository_revision(allow_dirty)
@@ -801,8 +876,12 @@ def main(probe: str = "identity", output: str = "", allow_dirty: bool = False) -
             result = laguna_dflash_capture_probe.remote(revision)
         elif probe == "ingest":
             result = specforge_batch_ingest_probe.remote(revision)
+        elif probe == "model-port":
+            result = specforge_laguna_model_port_probe.remote(revision)
         else:
-            raise ValueError("probe must be identity, target, dflash, capture, or ingest")
+            raise ValueError(
+                "probe must be identity, target, dflash, capture, ingest, or model-port"
+            )
         remote_status = result.get("status") if isinstance(result, dict) else None
         record: dict[str, Any] = {
             "probe": probe,
