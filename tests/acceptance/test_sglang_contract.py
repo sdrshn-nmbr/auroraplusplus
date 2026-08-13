@@ -11,6 +11,7 @@ import pytest
 from aurorapp.modal_probe import (
     _read_process_log,
     _run_until_terminal_record,
+    _sample_generate_after_cache_flush,
     _specforge_ingest_after_prewarm,
     _start_logged_process,
     _stop_process_group,
@@ -44,6 +45,28 @@ def test_pinned_raw_sglang_sampled_request_uses_request_sampling_seed() -> None:
     assert "seed" not in request["sampling_params"]
     assert len(SAMPLED_GENERATION_SEEDS) == 3
     assert len(set(SAMPLED_GENERATION_SEEDS)) == 3
+
+
+def test_sampled_request_flushes_prefix_cache_before_each_generation(monkeypatch) -> None:
+    events = []
+
+    def flush(_port):
+        events.append("flush")
+        return {"passed": True, "response_status": 200}
+
+    def generate(_port, _seed):
+        assert events == ["flush"]
+        events.append("generate")
+        return {"passed": True}
+
+    monkeypatch.setattr("aurorapp.modal_probe._flush_cache", flush)
+    monkeypatch.setattr("aurorapp.modal_probe._sample_generate", generate)
+
+    result = _sample_generate_after_cache_flush(30000, 17)
+
+    assert result["passed"] is True
+    assert result["cache_flush"] == {"passed": True, "response_status": 200}
+    assert events == ["flush", "generate"]
 
 
 def test_dflash_capture_contract_requires_all_official_laguna_layers() -> None:

@@ -269,6 +269,45 @@ def _sample_generate(port: int, sampling_seed: int) -> dict[str, Any]:
     )
 
 
+def _flush_cache(port: int) -> dict[str, Any]:
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}/flush_cache",
+        data=b"",
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            response_bytes = response.read()
+    except urllib.error.HTTPError as error:
+        return {
+            "passed": False,
+            "response_status": error.code,
+            "response_body": error.read().decode("utf-8", errors="replace"),
+        }
+    return {
+        "passed": response.status == 200,
+        "response_status": response.status,
+        "response_body": response_bytes.decode("utf-8", errors="replace"),
+    }
+
+
+def _sample_generate_after_cache_flush(
+    port: int,
+    sampling_seed: int,
+) -> dict[str, Any]:
+    cache_flush = _flush_cache(port)
+    if cache_flush.get("passed") is not True:
+        return {
+            "passed": False,
+            "cache_flush": cache_flush,
+            "error": "prefix cache flush failed before sampled generation",
+        }
+    return {
+        **_sample_generate(port, sampling_seed),
+        "cache_flush": cache_flush,
+    }
+
+
 def _capture_generate(port: int) -> dict[str, Any]:
     payload = {
         "text": "Write a Python function that adds two tensors.",
@@ -993,8 +1032,8 @@ def _sampled_serving_arm(
         server_healthy = True
         for sampling_seed in SAMPLED_GENERATION_SEEDS:
             generations[str(sampling_seed)] = [
-                _sample_generate(port, sampling_seed),
-                _sample_generate(port, sampling_seed),
+                _sample_generate_after_cache_flush(port, sampling_seed),
+                _sample_generate_after_cache_flush(port, sampling_seed),
             ]
     except Exception as exception:
         error = {"type": type(exception).__name__, "message": str(exception)}
