@@ -1,7 +1,6 @@
 import argparse
 import hashlib
 import inspect
-import json
 from pathlib import Path
 
 from huggingface_hub import HfApi, hf_hub_download
@@ -9,7 +8,7 @@ from sglang.srt.managers.tp_worker import TpModelWorker
 from transformers import AutoTokenizer
 
 from aurorapp.canonical import canonical_sha256, file_sha256
-from aurorapp.model_port import TokenizerTemplateIdentityResult
+from aurorapp.model_port import TokenizerTemplateIdentityResult, probe_wire_json
 from aurorapp.sglang_contract import LAGUNA_TOKENIZER_FILE_HASHES
 
 TOKENIZER_FILES = tuple(LAGUNA_TOKENIZER_FILE_HASHES)
@@ -120,10 +119,7 @@ def main() -> None:
         draft_worker_skips_tokenizer=draft_worker_skips_tokenizer,
         sglang_tokenizer_source_hash=file_sha256(source_path),
     )
-    print(
-        "AURORAPP_TOKENIZER_RESULT=" + json.dumps(result.model_dump(mode="json"), sort_keys=True),
-        flush=True,
-    )
+    print("AURORAPP_TOKENIZER_RESULT=" + probe_wire_json(result), flush=True)
 
 
 if __name__ == "__main__":

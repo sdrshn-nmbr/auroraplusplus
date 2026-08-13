@@ -218,6 +218,7 @@ def test_tokenizer_template_identity_requires_pinned_files_and_shared_runtime() 
     )
 
     assert result.passed is True
+    assert TokenizerTemplateIdentityResult.model_validate_json(probe_wire_json(result)) == result
     with_override = result.model_copy(update={"draft_tokenizer_overrides": ("tokenizer.json",)})
     assert with_override.passed is False
     assert result.model_copy(update={"loaded_chat_template_hash": "9" * 64}).passed is False
