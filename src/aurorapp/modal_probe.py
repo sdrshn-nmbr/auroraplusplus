@@ -15,7 +15,7 @@ import modal
 from aurorapp.artifacts import ContentAddressedArtifactStore
 from aurorapp.canonical import canonical_bytes
 from aurorapp.models import ArtifactRef
-from aurorapp.sglang_contract import greedy_generation_request
+from aurorapp.sglang_contract import SGLANG_SERVER_RANDOM_SEED, greedy_generation_request
 
 TARGET_REPOSITORY = "poolside/Laguna-XS-2.1-INT4"
 TARGET_REVISION = "4b7e28abdc0a8b121def816b89d631750bc53c92"
@@ -233,6 +233,8 @@ def _server_probe(speculative: bool, repository_revision: str) -> dict[str, Any]
         "1",
         "--mem-fraction-static",
         "0.7",
+        "--random-seed",
+        str(SGLANG_SERVER_RANDOM_SEED),
         "--host",
         "127.0.0.1",
         "--port",

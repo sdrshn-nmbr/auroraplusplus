@@ -85,6 +85,41 @@ def verify_compatibility_report(
     return True
 
 
+class ProbeParityResult(StrictModel):
+    passed: bool
+    mismatches: tuple[str, ...]
+
+
+def verify_greedy_probe_parity(
+    target: dict[str, object],
+    challenger: dict[str, object],
+) -> ProbeParityResult:
+    mismatches: list[str] = []
+    for identity in ("repository_revision", "modal_image_id"):
+        if target.get(identity) != challenger.get(identity):
+            mismatches.append(identity)
+    target_result = target.get("result")
+    challenger_result = challenger.get("result")
+    if not isinstance(target_result, dict) or not isinstance(challenger_result, dict):
+        return ProbeParityResult(passed=False, mismatches=("result",))
+    if target_result.get("runtime") != challenger_result.get("runtime"):
+        mismatches.append("runtime")
+    target_response = _probe_response(target_result)
+    challenger_response = _probe_response(challenger_result)
+    for surface in ("output_ids", "text"):
+        if target_response.get(surface) != challenger_response.get(surface):
+            mismatches.append(surface)
+    return ProbeParityResult(passed=not mismatches, mismatches=tuple(mismatches))
+
+
+def _probe_response(result: dict[str, object]) -> dict[str, object]:
+    generation = result.get("generation")
+    if not isinstance(generation, dict):
+        return {}
+    response = generation.get("response_body")
+    return response if isinstance(response, dict) else {}
+
+
 class ModelManifestResolver:
     def __init__(self, cache_directory: Path) -> None:
         self.cache_directory = cache_directory

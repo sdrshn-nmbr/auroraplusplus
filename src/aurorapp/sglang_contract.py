@@ -1,5 +1,7 @@
 from typing import Any
 
+SGLANG_SERVER_RANDOM_SEED = 20260812
+
 
 def greedy_generation_request(text: str, max_new_tokens: int) -> dict[str, Any]:
     if not text:

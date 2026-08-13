@@ -7,6 +7,7 @@ from aurorapp.compatibility import (
     CompatibilityStatus,
     CompatibilityStepResult,
     verify_compatibility_report,
+    verify_greedy_probe_parity,
 )
 from aurorapp.models import ArtifactRef, EvidenceLevel
 
@@ -96,3 +97,25 @@ def test_unresolvable_or_wrong_runtime_evidence_blocks_activation(tmp_path: Path
     )
 
     assert verify_compatibility_report(report, store) is False
+
+
+def test_greedy_probe_parity_compares_exact_token_and_text_surfaces() -> None:
+    target = {
+        "repository_revision": RUN_ID,
+        "modal_image_id": "image",
+        "result": {
+            "generation": {"response_body": {"output_ids": [1, 2], "text": "ok"}},
+            "runtime": {"cuda_base_image": "cuda"},
+        },
+    }
+    challenger = target | {
+        "result": {
+            "generation": {"response_body": {"output_ids": [1, 3], "text": "bad"}},
+            "runtime": {"cuda_base_image": "cuda"},
+        }
+    }
+
+    result = verify_greedy_probe_parity(target, challenger)
+
+    assert result.passed is False
+    assert result.mismatches == ("output_ids", "text")
