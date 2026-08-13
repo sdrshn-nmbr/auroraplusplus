@@ -34,6 +34,7 @@ from aurorapp.models import ArtifactRef
 from aurorapp.sglang_contract import (
     SAMPLED_GENERATION_SEEDS,
     SGLANG_SERVER_RANDOM_SEED,
+    MooncakeReplayEnvelope,
     greedy_generation_request,
     sampled_generation_request,
 )
@@ -62,12 +63,22 @@ sglang_runtime_image = (
         "/opt/aurorapp/spec-capture.patch",
         copy=True,
     )
+    .add_local_file(
+        "patches/sglang/6a5a9ec/position-coupled-dflash-sampling.patch",
+        "/opt/aurorapp/position-coupled-dflash-sampling.patch",
+        copy=True,
+    )
     .env({"SGLANG_BUILD_RUST_EXTS": "none"})
     .run_commands(
         "git clone --filter=blob:none https://github.com/sgl-project/sglang.git /opt/sglang",
         f"git -C /opt/sglang checkout {SGLANG_REVISION}",
         "git -C /opt/sglang apply --check /opt/aurorapp/spec-capture.patch",
         "git -C /opt/sglang apply /opt/aurorapp/spec-capture.patch",
+        (
+            "git -C /opt/sglang apply --check "
+            "/opt/aurorapp/position-coupled-dflash-sampling.patch"
+        ),
+        "git -C /opt/sglang apply /opt/aurorapp/position-coupled-dflash-sampling.patch",
         "python -m pip install --upgrade pip uv",
         "uv pip install --system -e '/opt/sglang/python[all]'",
         "uv pip install --system mooncake-transfer-engine-cuda13==0.3.12.post1",
@@ -177,6 +188,12 @@ def _runtime_identity(repository_revision: str) -> dict[str, Any]:
         "cuda_toolkit": _run(["nvcc", "--version"]),
         "sglang_revision": SGLANG_REVISION,
         "specforge_revision": SPECFORGE_REVISION,
+        "patches": {
+            "spec_capture": file_sha256(Path("/opt/aurorapp/spec-capture.patch")),
+            "position_coupled_dflash_sampling": file_sha256(
+                Path("/opt/aurorapp/position-coupled-dflash-sampling.patch")
+            ),
+        },
         "build_environment": {
             "SGLANG_BUILD_RUST_EXTS": "none",
             "SGLANG_ENABLE_JIT_DEEPGEMM": "0",
@@ -267,45 +284,6 @@ def _sample_generate(port: int, sampling_seed: int) -> dict[str, Any]:
             sampling_seed=sampling_seed,
         ),
     )
-
-
-def _flush_cache(port: int) -> dict[str, Any]:
-    request = urllib.request.Request(
-        f"http://127.0.0.1:{port}/flush_cache",
-        data=b"",
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            response_bytes = response.read()
-    except urllib.error.HTTPError as error:
-        return {
-            "passed": False,
-            "response_status": error.code,
-            "response_body": error.read().decode("utf-8", errors="replace"),
-        }
-    return {
-        "passed": response.status == 200,
-        "response_status": response.status,
-        "response_body": response_bytes.decode("utf-8", errors="replace"),
-    }
-
-
-def _sample_generate_after_cache_flush(
-    port: int,
-    sampling_seed: int,
-) -> dict[str, Any]:
-    cache_flush = _flush_cache(port)
-    if cache_flush.get("passed") is not True:
-        return {
-            "passed": False,
-            "cache_flush": cache_flush,
-            "error": "prefix cache flush failed before sampled generation",
-        }
-    return {
-        **_sample_generate(port, sampling_seed),
-        "cache_flush": cache_flush,
-    }
 
 
 def _capture_generate(port: int) -> dict[str, Any]:
@@ -448,6 +426,13 @@ def validate_specforge_ingest_result(
         or release_drain.get("release_pending") != 0
     ):
         raise ValueError("SpecForge did not release the materialized batch")
+    if result.get("replay_verified") is not True:
+        raise ValueError("Mooncake replay did not reproduce exact tensor bytes")
+    envelope = MooncakeReplayEnvelope.model_validate(result.get("replay_envelope"))
+    if envelope.input_ids_hash != canonical_sha256(expected_input_ids):
+        raise ValueError("Mooncake replay envelope input IDs do not match the batch")
+    if envelope.loss_mask_hash != canonical_sha256(expected_loss_mask):
+        raise ValueError("Mooncake replay envelope loss mask does not match the batch")
     return token_count, 10240
 
 
@@ -1009,6 +994,7 @@ def _sampled_serving_arm(
         "--random-seed",
         str(SGLANG_SERVER_RANDOM_SEED),
         "--enable-deterministic-inference",
+        "--disable-radix-cache",
         "--host",
         "127.0.0.1",
         "--port",
@@ -1032,8 +1018,8 @@ def _sampled_serving_arm(
         server_healthy = True
         for sampling_seed in SAMPLED_GENERATION_SEEDS:
             generations[str(sampling_seed)] = [
-                _sample_generate_after_cache_flush(port, sampling_seed),
-                _sample_generate_after_cache_flush(port, sampling_seed),
+                _sample_generate(port, sampling_seed),
+                _sample_generate(port, sampling_seed),
             ]
     except Exception as exception:
         error = {"type": type(exception).__name__, "message": str(exception)}

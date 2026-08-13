@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import json
 import os
 
@@ -12,9 +13,23 @@ from specforge.inference.capture import CaptureConfig
 from specforge.runtime.contracts import PromptTask
 from specforge.runtime.data_plane.mooncake_store import MooncakeFeatureStore
 
+from aurorapp.canonical import canonical_sha256
+from aurorapp.sglang_contract import LAGUNA_TOKENIZER_FILE_HASHES, MooncakeReplayEnvelope
+
 INPUT_IDS = [1, 2, 3, 4]
 LOSS_MASK = [0, 0, 1, 1]
 AUX_LAYER_IDS = (1, 13, 25, 33, 39)
+TARGET_REPOSITORY = "poolside/Laguna-XS-2.1-INT4"
+TARGET_REVISION = "4b7e28abdc0a8b121def816b89d631750bc53c92"
+
+
+def tensor_sha256(value: torch.Tensor) -> str:
+    contiguous = value.detach().cpu().contiguous()
+    digest = hashlib.sha256()
+    digest.update(str(contiguous.dtype).encode())
+    digest.update(json.dumps(list(contiguous.shape), separators=(",", ":")).encode())
+    digest.update(contiguous.view(torch.uint8).numpy().tobytes())
+    return digest.hexdigest()
 
 
 def main() -> None:
@@ -40,7 +55,7 @@ def main() -> None:
         source_id="compatibility-probe",
         payload={"input_ids": INPUT_IDS, "loss_mask": LOSS_MASK},
         max_length=len(INPUT_IDS),
-        target_model_version="poolside/Laguna-XS-2.1-INT4",
+        target_model_version=TARGET_REPOSITORY,
         metadata={"num_tokens": len(INPUT_IDS), "tokenizer_version": "pinned"},
     )
     adapter = SGLangServerCaptureAdapter(
@@ -66,6 +81,7 @@ def main() -> None:
     )
     ref = None
     handle = None
+    replay_handle = None
     released = False
     release_drain = None
     try:
@@ -76,6 +92,14 @@ def main() -> None:
         if isinstance(ref, ServerCaptureFailure):
             raise RuntimeError(ref.reason)
         tensors, handle = store.get(ref)
+        replay_tensors, replay_handle = store.get(ref)
+        tensor_hashes = {name: tensor_sha256(value) for name, value in tensors.items()}
+        replay_tensor_hashes = {
+            name: tensor_sha256(value) for name, value in replay_tensors.items()
+        }
+        replay_verified = tensor_hashes == replay_tensor_hashes
+        if not replay_verified:
+            raise RuntimeError("Mooncake replay returned different tensor bytes")
         materialized = {
             "input_ids": {
                 "shape": list(tensors["input_ids"].shape),
@@ -94,9 +118,36 @@ def main() -> None:
                 "absolute_sum": float(tensors["hidden_states"].float().abs().sum().item()),
             },
         }
+        envelope = MooncakeReplayEnvelope(
+            run_id=canonical_sha256(
+                {
+                    "probe": "specforge-ingest",
+                    "target_repository": TARGET_REPOSITORY,
+                    "target_revision": TARGET_REVISION,
+                    "task": task.payload,
+                }
+            ),
+            request_id=task.task_id,
+            target_repository=TARGET_REPOSITORY,
+            target_revision=TARGET_REVISION,
+            tokenizer_hash=canonical_sha256(LAGUNA_TOKENIZER_FILE_HASHES),
+            sampling_contract_hash=canonical_sha256(
+                {"version": "capture-only-v1", "sampling": "none"}
+            ),
+            input_ids_hash=canonical_sha256(INPUT_IDS),
+            loss_mask_hash=canonical_sha256(LOSS_MASK),
+            hidden_states_hash=tensor_hashes["hidden_states"],
+            hidden_state_shape=tuple(
+                int(value) for value in tensors["hidden_states"].shape
+            ),
+            hidden_state_dtype="bfloat16",
+            aux_layer_ids=AUX_LAYER_IDS,
+        )
         store.release(handle, reason="compatibility-probe-consumed")
-        released = True
         handle = None
+        store.release(replay_handle, reason="compatibility-probe-replay-consumed")
+        replay_handle = None
+        released = True
         release_drain = store.drain_pending_removals()
         result = {
             "sample_id": ref.sample_id,
@@ -110,6 +161,8 @@ def main() -> None:
                 for name, spec in ref.feature_specs.items()
             },
             "materialized": materialized,
+            "replay_envelope": envelope.model_dump(mode="json"),
+            "replay_verified": replay_verified,
             "released": released,
             "release_drain": release_drain,
         }
@@ -117,7 +170,9 @@ def main() -> None:
     finally:
         if handle is not None:
             store.release(handle, reason="compatibility-probe-finally")
-        elif ref is not None and not released:
+        if replay_handle is not None:
+            store.release(replay_handle, reason="compatibility-probe-replay-finally")
+        if ref is not None and not released:
             store.abort(ref.sample_id, reason="compatibility-probe-finally")
         if release_drain is None:
             store.drain_pending_removals()

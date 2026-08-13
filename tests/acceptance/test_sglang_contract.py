@@ -8,10 +8,11 @@ import time
 
 import pytest
 
+from aurorapp.canonical import canonical_sha256
 from aurorapp.modal_probe import (
     _read_process_log,
     _run_until_terminal_record,
-    _sample_generate_after_cache_flush,
+    _sampled_serving_arm,
     _specforge_ingest_after_prewarm,
     _start_logged_process,
     _stop_process_group,
@@ -21,6 +22,9 @@ from aurorapp.modal_probe import (
 from aurorapp.sglang_contract import (
     SAMPLED_GENERATION_SEEDS,
     SGLANG_SERVER_RANDOM_SEED,
+    MooncakeReplayEnvelope,
+    PositionSamplingContract,
+    SamplingDecisionDomain,
     greedy_generation_request,
     sampled_generation_request,
 )
@@ -47,26 +51,61 @@ def test_pinned_raw_sglang_sampled_request_uses_request_sampling_seed() -> None:
     assert len(set(SAMPLED_GENERATION_SEEDS)) == 3
 
 
-def test_sampled_request_flushes_prefix_cache_before_each_generation(monkeypatch) -> None:
-    events = []
+def test_target_and_dflash_use_the_same_position_sampling_decision() -> None:
+    target = PositionSamplingContract(
+        sampling_seed=17,
+        absolute_position=41,
+        domain=SamplingDecisionDomain.TARGET_TOKEN,
+    )
+    dflash = PositionSamplingContract(
+        sampling_seed=17,
+        absolute_position=41,
+        domain=SamplingDecisionDomain.DFLASH_TARGET_TOKEN,
+    )
 
-    def flush(_port):
-        events.append("flush")
-        return {"passed": True, "response_status": 200}
+    assert target.decision_key == dflash.decision_key
+    assert target.model_copy(update={"absolute_position": 42}).decision_key != target.decision_key
+    assert target.model_copy(update={"sampling_seed": 18}).decision_key != target.decision_key
 
-    def generate(_port, _seed):
-        assert events == ["flush"]
-        events.append("generate")
-        return {"passed": True}
 
-    monkeypatch.setattr("aurorapp.modal_probe._flush_cache", flush)
-    monkeypatch.setattr("aurorapp.modal_probe._sample_generate", generate)
+def test_mooncake_replay_envelope_binds_all_derived_training_inputs() -> None:
+    value = "a" * 64
+    envelope = MooncakeReplayEnvelope(
+        run_id=value,
+        request_id="request-1",
+        target_repository="poolside/Laguna-XS-2.1-INT4",
+        target_revision="4b7e28abdc0a8b121def816b89d631750bc53c92",
+        tokenizer_hash=value,
+        sampling_contract_hash=value,
+        input_ids_hash=value,
+        loss_mask_hash=value,
+        hidden_states_hash=value,
+        hidden_state_shape=(1, 10, 10240),
+        hidden_state_dtype="bfloat16",
+        aux_layer_ids=(1, 13, 25, 33, 39),
+    )
 
-    result = _sample_generate_after_cache_flush(30000, 17)
+    assert envelope.hidden_state_shape == (1, 10, 10240)
+    with pytest.raises(ValueError, match="official Laguna"):
+        MooncakeReplayEnvelope.model_validate(
+            {**envelope.model_dump(), "aux_layer_ids": [1, 13, 25]}
+        )
 
-    assert result["passed"] is True
-    assert result["cache_flush"] == {"passed": True, "response_status": 200}
-    assert events == ["flush", "generate"]
+
+def test_sampled_probe_disables_shared_prefix_state(monkeypatch) -> None:
+    commands = []
+
+    def start(command):
+        commands.append(command)
+        raise RuntimeError("stop after command construction")
+
+    monkeypatch.setattr("aurorapp.modal_probe._start_logged_process", start)
+
+    with pytest.raises(RuntimeError, match="command construction"):
+        _sampled_serving_arm(port=30000, speculative_draft_path=None)
+
+    assert "--disable-radix-cache" in commands[0]
+    assert "--enable-deterministic-inference" in commands[0]
 
 
 def test_dflash_capture_contract_requires_all_official_laguna_layers() -> None:
@@ -91,6 +130,7 @@ def test_dflash_capture_contract_requires_all_official_laguna_layers() -> None:
 
 
 def test_specforge_ingest_requires_exact_materialized_training_tensors() -> None:
+    value = "a" * 64
     result = {
         "sample_id": "aurorapp-ingest:task-1",
         "strategy": "dflash",
@@ -114,6 +154,21 @@ def test_specforge_ingest_requires_exact_materialized_training_tensors() -> None
         },
         "released": True,
         "release_drain": {"release_pending": 0},
+        "replay_verified": True,
+        "replay_envelope": {
+            "run_id": value,
+            "request_id": "task-1",
+            "target_repository": "poolside/Laguna-XS-2.1-INT4",
+            "target_revision": "4b7e28abdc0a8b121def816b89d631750bc53c92",
+            "tokenizer_hash": value,
+            "sampling_contract_hash": value,
+            "input_ids_hash": canonical_sha256([1, 2, 3, 4]),
+            "loss_mask_hash": canonical_sha256([0, 0, 1, 1]),
+            "hidden_states_hash": value,
+            "hidden_state_shape": [1, 4, 10240],
+            "hidden_state_dtype": "bfloat16",
+            "aux_layer_ids": [1, 13, 25, 33, 39],
+        },
     }
 
     assert validate_specforge_ingest_result(result, [1, 2, 3, 4], [0, 0, 1, 1]) == (
@@ -123,6 +178,11 @@ def test_specforge_ingest_requires_exact_materialized_training_tensors() -> None
 
     result["materialized"]["loss_mask"]["values"] = [0, 0, 0, 0]
     with pytest.raises(ValueError, match="loss mask"):
+        validate_specforge_ingest_result(result, [1, 2, 3, 4], [0, 0, 1, 1])
+
+    result["materialized"]["loss_mask"]["values"] = [0, 0, 1, 1]
+    result["replay_verified"] = False
+    with pytest.raises(ValueError, match="replay"):
         validate_specforge_ingest_result(result, [1, 2, 3, 4], [0, 0, 1, 1])
 
 
@@ -188,6 +248,7 @@ def test_cleanup_kills_children_after_process_group_leader_exits(monkeypatch) ->
             "import subprocess; subprocess.Popen(['sleep', '60'])",
         ],
         start_new_session=True,
+        text=True,
     )
     process_group = process.pid
     process.wait(timeout=5)

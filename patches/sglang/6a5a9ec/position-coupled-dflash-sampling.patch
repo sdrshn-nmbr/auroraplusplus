@@ -1,0 +1,178 @@
+diff --git a/python/sglang/srt/speculative/dflash_utils.py b/python/sglang/srt/speculative/dflash_utils.py
+index 264b30519..763a891c4 100644
+--- a/python/sglang/srt/speculative/dflash_utils.py
++++ b/python/sglang/srt/speculative/dflash_utils.py
+@@ -14,6 +14,7 @@ import triton.language as tl
+ from sglang.srt.layers.quantization.unquant import UnquantizedLinearMethod
+ from sglang.srt.layers.sampler import (
+     apply_custom_logit_processor,
++    top_k_top_p_min_p_sampling_from_probs_torch,
+     top_p_normalize_probs_torch,
+ )
+ from sglang.srt.managers.schedule_batch import Req
+@@ -899,6 +900,55 @@ def compute_dflash_sampling_correct_drafts_and_bonus(
+     return correct_len, bonus
+ 
+ 
++def compute_dflash_position_coupled_drafts_and_bonus(
++    *,
++    candidates: torch.Tensor,
++    next_token_logits: torch.Tensor,
++    sampling_info: Any,
++    positions: torch.Tensor,
++    max_top_k: Optional[int] = None,
++    uniform_top_k_value: Optional[int] = None,
++) -> Tuple[torch.Tensor, torch.Tensor]:
++    """Use the target sampler's position-keyed decision for DFlash verification."""
++    sampling_seed = getattr(sampling_info, "sampling_seed", None)
++    if sampling_seed is None:
++        raise ValueError("position-coupled DFlash sampling requires sampling_seed")
++
++    bs, draft_token_num = candidates.shape
++    if positions.shape != candidates.shape:
++        raise ValueError(
++            "DFlash sampling positions must match candidates, "
++            f"got positions={tuple(positions.shape)} candidates={tuple(candidates.shape)}"
++        )
++    target_probs = build_dflash_verify_target_probs(
++        next_token_logits=next_token_logits,
++        sampling_info=sampling_info,
++        draft_token_num=draft_token_num,
++        bs=bs,
++        max_top_k=max_top_k,
++        uniform_top_k_value=uniform_top_k_value,
++    ).view(bs * draft_token_num, -1)
++    row_count = bs * draft_token_num
++    target_predict = top_k_top_p_min_p_sampling_from_probs_torch(
++        target_probs,
++        torch.full(
++            (row_count,),
++            target_probs.shape[-1],
++            dtype=torch.int32,
++            device=target_probs.device,
++        ),
++        torch.ones(row_count, dtype=torch.float32, device=target_probs.device),
++        torch.zeros(row_count, dtype=torch.float32, device=target_probs.device),
++        False,
++        torch.repeat_interleave(sampling_seed, draft_token_num, dim=0),
++        positions.reshape(-1),
++    ).view(bs, draft_token_num)
++    return compute_dflash_correct_drafts_and_bonus(
++        candidates=candidates,
++        target_predict=target_predict,
++    )
++
++
+ def build_dflash_verify_target_probs(
+     *,
+     next_token_logits: torch.Tensor,
+diff --git a/python/sglang/srt/speculative/dflash_worker_v2.py b/python/sglang/srt/speculative/dflash_worker_v2.py
+index d0c3888ae..b9d45e177 100644
+--- a/python/sglang/srt/speculative/dflash_worker_v2.py
++++ b/python/sglang/srt/speculative/dflash_worker_v2.py
+@@ -38,6 +38,7 @@ from sglang.srt.speculative.dflash_utils import (
+     apply_dflash_verify_logits_adjustments,
+     can_dflash_use_fused_qkv_proj,
+     compute_dflash_correct_drafts_and_bonus,
++    compute_dflash_position_coupled_drafts_and_bonus,
+     compute_dflash_sampling_correct_drafts_and_bonus,
+     is_dflash_sampling_verify_available,
+     parse_dflash_draft_config,
+@@ -1790,13 +1791,23 @@ class DFlashWorkerV2(BaseSpecWorker):
+             and not sampling_info.is_all_greedy
+             and is_dflash_sampling_verify_available()
+         ):
+-            accept_len, bonus = compute_dflash_sampling_correct_drafts_and_bonus(
+-                candidates=candidates,
+-                next_token_logits=logits_output.next_token_logits,
+-                sampling_info=sampling_info,
+-                max_top_k=draft_input.max_top_k,
+-                uniform_top_k_value=draft_input.uniform_top_k_value,
+-            )
++            if sampling_info.sampling_seed is not None:
++                accept_len, bonus = compute_dflash_position_coupled_drafts_and_bonus(
++                    candidates=candidates,
++                    next_token_logits=logits_output.next_token_logits,
++                    sampling_info=sampling_info,
++                    positions=positions_2d,
++                    max_top_k=draft_input.max_top_k,
++                    uniform_top_k_value=draft_input.uniform_top_k_value,
++                )
++            else:
++                accept_len, bonus = compute_dflash_sampling_correct_drafts_and_bonus(
++                    candidates=candidates,
++                    next_token_logits=logits_output.next_token_logits,
++                    sampling_info=sampling_info,
++                    max_top_k=draft_input.max_top_k,
++                    uniform_top_k_value=draft_input.uniform_top_k_value,
++                )
+             commit_lens = accept_len.to(torch.int32) + 1  # [bs]
+             out_tokens = torch.empty(
+                 (bs, int(self.block_size)), dtype=torch.int64, device=device
+diff --git a/test/registered/unit/spec/test_dflash_overlap_hostsync.py b/test/registered/unit/spec/test_dflash_overlap_hostsync.py
+index a78e2e59e..c7aa7c5df 100644
+--- a/test/registered/unit/spec/test_dflash_overlap_hostsync.py
++++ b/test/registered/unit/spec/test_dflash_overlap_hostsync.py
+@@ -16,6 +16,62 @@ register_cuda_ci(est_time=30, stage="base-b", runner_config="1-gpu-small")
+ _HAS_CUDA = torch.cuda.is_available()
+ 
+ 
++class TestPositionCoupledSampling(CustomTestCase):
++    def test_dflash_reuses_target_token_decisions(self):
++        from sglang.srt.layers.sampler import (
++            top_k_top_p_min_p_sampling_from_probs_torch,
++        )
++        from sglang.srt.speculative.dflash_utils import (
++            compute_dflash_position_coupled_drafts_and_bonus,
++        )
++
++        batch_size, block_size, vocab_size = 2, 4, 32
++        generator = torch.Generator().manual_seed(7)
++        logits = torch.randn(
++            batch_size * block_size,
++            vocab_size,
++            generator=generator,
++            dtype=torch.float32,
++        )
++        seeds = torch.tensor([17, 42], dtype=torch.int64)
++        positions = torch.tensor([[10, 11, 12, 13], [21, 22, 23, 24]])
++        sampling_info = SimpleNamespace(
++            sampling_seed=seeds,
++            temperatures=torch.ones(batch_size, 1),
++            top_ks=torch.full((batch_size,), vocab_size, dtype=torch.int32),
++            top_ps=torch.ones(batch_size),
++            need_top_k_sampling=False,
++            need_top_p_sampling=False,
++        )
++        probabilities = torch.softmax(logits, dim=-1)
++        expected = top_k_top_p_min_p_sampling_from_probs_torch(
++            probabilities,
++            torch.full(
++                (batch_size * block_size,), vocab_size, dtype=torch.int32
++            ),
++            torch.ones(batch_size * block_size),
++            torch.zeros(batch_size * block_size),
++            False,
++            torch.repeat_interleave(seeds, block_size),
++            positions.reshape(-1),
++        ).view(batch_size, block_size)
++        candidates = torch.zeros(batch_size, block_size, dtype=torch.int64)
++        candidates[:, 1:].copy_(expected[:, :-1])
++
++        accepted, bonus = compute_dflash_position_coupled_drafts_and_bonus(
++            candidates=candidates,
++            next_token_logits=logits,
++            sampling_info=sampling_info,
++            positions=positions,
++        )
++
++        torch.testing.assert_close(
++            accepted,
++            torch.full((batch_size,), block_size - 1, dtype=torch.int32),
++        )
++        torch.testing.assert_close(bonus, expected[:, -1].to(torch.int64))
++
++
+ def _compact_lens_exact(seq_lens, window, page):
+     fake_self = SimpleNamespace(
+         device=seq_lens.device, draft_window_size=window, page_size=page

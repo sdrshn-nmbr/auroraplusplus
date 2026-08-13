@@ -13,6 +13,9 @@ SPECFORGE_REPOSITORY = "https://github.com/sgl-project/SpecForge.git"
 SPECFORGE_REVISION = "e6440f09a8574b35f894608559fd3d165971e488"
 PATCH_PATH = "patches/sglang/v0.5.14/spec-capture.patch"
 PORT_PATCH_PATH = Path("patches/sglang/6a5a9ec/spec-capture.patch")
+SAMPLING_PATCH_PATH = Path(
+    "patches/sglang/6a5a9ec/position-coupled-dflash-sampling.patch"
+)
 EXPECTED_REJECTED_FILES = (
     "python/sglang/srt/layers/logits_processor.py",
     "python/sglang/srt/managers/detokenizer_manager.py",
@@ -43,6 +46,7 @@ class SourceCompatibilityResult(StrictModel):
     specforge_revision: GitRevision
     upstream_patch: PatchApplicationResult
     ported_patch: PatchApplicationResult
+    sampling_patch: PatchApplicationResult
     upstream_incompatibility_verified: bool
 
 
@@ -109,6 +113,11 @@ def run_capture_patch_probe(aurorapp_repository: Path) -> SourceCompatibilityRes
             resolved_sglang,
             aurorapp_repository / PORT_PATCH_PATH,
         )
+        sampling = check_patch_application(
+            sglang,
+            resolved_sglang,
+            aurorapp_repository / SAMPLING_PATCH_PATH,
+        )
     expected = (
         upstream.exit_code == 1
         and resolved_sglang == SGLANG_REVISION
@@ -121,6 +130,7 @@ def run_capture_patch_probe(aurorapp_repository: Path) -> SourceCompatibilityRes
         specforge_revision=resolved_specforge,
         upstream_patch=upstream,
         ported_patch=ported,
+        sampling_patch=sampling,
         upstream_incompatibility_verified=expected,
     )
 
