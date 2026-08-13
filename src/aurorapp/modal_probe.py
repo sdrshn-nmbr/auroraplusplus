@@ -1,3 +1,4 @@
+import contextlib
 import json
 import os
 import platform
@@ -299,19 +300,26 @@ def _gpu_processes() -> list[str]:
 
 def _stop_process_group(process: subprocess.Popen[str], port: int) -> dict[str, Any]:
     process_group = os.getpgid(process.pid) if process.poll() is None else process.pid
-    if process.poll() is None:
+    with contextlib.suppress(ProcessLookupError):
         os.killpg(process_group, signal.SIGTERM)
-        try:
+    if process.poll() is None:
+        with contextlib.suppress(subprocess.TimeoutExpired):
             process.wait(timeout=30)
-        except subprocess.TimeoutExpired:
+    remaining = _process_group_members(process_group)
+    if remaining:
+        with contextlib.suppress(ProcessLookupError):
             os.killpg(process_group, signal.SIGKILL)
-            process.wait(timeout=30)
-    remaining = subprocess.run(
-        ["pgrep", "-g", str(process_group)],
-        check=False,
-        capture_output=True,
-        text=True,
-    ).stdout.splitlines()
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            remaining = _process_group_members(process_group)
+            if not remaining:
+                break
+            time.sleep(0.1)
+    if process.poll() is None:
+        process.wait(timeout=10)
+    port_deadline = time.monotonic() + 5
+    while time.monotonic() < port_deadline and not _port_is_closed(port):
+        time.sleep(0.1)
     return {
         "process_group": process_group,
         "remaining_processes": remaining,
@@ -319,6 +327,15 @@ def _stop_process_group(process: subprocess.Popen[str], port: int) -> dict[str, 
         "port_closed": _port_is_closed(port),
         "parent_returncode": process.returncode,
     }
+
+
+def _process_group_members(process_group: int) -> list[str]:
+    return subprocess.run(
+        ["pgrep", "-g", str(process_group)],
+        check=False,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
 
 
 def _server_probe(speculative: bool, repository_revision: str) -> dict[str, Any]:

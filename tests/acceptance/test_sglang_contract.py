@@ -1,6 +1,13 @@
+import contextlib
+import os
+import signal
+import socket
+import subprocess
+import sys
+
 import pytest
 
-from aurorapp.modal_probe import validate_dflash_capture_result
+from aurorapp.modal_probe import _stop_process_group, validate_dflash_capture_result
 from aurorapp.sglang_contract import SGLANG_SERVER_RANDOM_SEED, greedy_generation_request
 
 
@@ -30,3 +37,27 @@ def test_dflash_capture_contract_requires_all_official_laguna_layers() -> None:
     result["features"]["target_aux_hidden_states"]["shape"] = [1, 7, 8192]
     with pytest.raises(ValueError, match="feature shape"):
         validate_dflash_capture_result(result)
+
+
+def test_cleanup_kills_children_after_process_group_leader_exits(monkeypatch) -> None:
+    monkeypatch.setattr("aurorapp.modal_probe._gpu_processes", lambda: [])
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        closed_port = probe.getsockname()[1]
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import subprocess; subprocess.Popen(['sleep', '60'])",
+        ],
+        start_new_session=True,
+    )
+    process_group = process.pid
+    process.wait(timeout=5)
+    try:
+        cleanup = _stop_process_group(process, closed_port)
+        assert cleanup["remaining_processes"] == []
+        assert cleanup["port_closed"] is True
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(process_group, signal.SIGKILL)
